@@ -3,12 +3,17 @@ import { element, button, input, select, statusNode, descriptorData, filesOf } f
 const formats = ['png', 'jpg', 'bmp', 'pdf'];
 const formatOptions = formats.map(value => ({ value, label: value.toUpperCase() }));
 const rangeOptions = [{ value: 'current', label: '当前页' }, { value: 'selected', label: '选中的页面' }, { value: 'all', label: '全部页面' }, { value: 'custom', label: '自定义页码' }];
+// Mac questions go to the Mac fork; the Windows author keeps attribution and the feature guide.
 const links = {
-  github: 'https://github.com/Achuan-2/my_ppt_plugin/',
+  feedback: 'https://github.com/nwh-phy/SlideSCI-Mac/issues',
+  github: 'https://github.com/nwh-phy/SlideSCI-Mac',
+  install: 'https://github.com/nwh-phy/SlideSCI-Mac/blob/main/mac/DISTRIBUTION.md',
   help: 'https://www.yuque.com/achuan-2/blog/etzcergpmb4rr2sk/',
   developer: 'https://www.github.com/achuan-2',
   sponsor: 'https://fastly.jsdelivr.net/gh/Achuan-2/PicBed/assets/20241128221208-2024-11-28.png'
 };
+const linkLabels = { feedback: 'Mac 版问题反馈', github: 'Mac 版源代码', install: 'Mac 版安装与常见问题', help: '功能使用文档（原版）', developer: '原版作者主页', sponsor: '赞助原版作者' };
+const maintainer = 'Mac 版：nwh-phy（问题请在 Mac 版 GitHub 反馈）；原版作者：Achuan-2';
 function safeName(value, fallback = 'SlideSCI') {
   const result = String(value || fallback).trim().replace(/[\x00-\x1f/\\:*?"<>|]/gu, '_').replace(/\.(pptx|ppt|pdf|png|jpg|bmp|svg)$/iu, '');
   if (!result || result === '.' || result === '..' || result.length > 180) throw new Error('请输入有效的文件名（最多180字）。');
@@ -107,9 +112,9 @@ export const actions = [
     const result = await ctx.host.export({ kind: 'selection', ids: selectionIds, format: 'png', dpi: 300 });
     const file = await descriptorData(filesOf(result)[0], ctx.services); await ctx.services.writeClipboard({ data: file.data, mime: file.mime || 'image/png' }); ctx.notify('已复制选中对象的PNG图片。'); return result;
   } },
-  ...Object.entries(links).map(([name, url]) => ({ id: `export.${name}`, label: ({ github: 'GitHub 源代码', help: '使用文档', developer: '开发者主页', sponsor: '赞助开发者' })[name], section: '设置与帮助', run: ctx => ctx.services.openExternal(url) })),
+  ...Object.entries(links).map(([name, url]) => ({ id: `export.${name}`, label: linkLabels[name], section: '设置与帮助', run: ctx => ctx.services.openExternal(url) })),
   { id: 'export.version', label: '当前版本', section: '设置与帮助', run: async ctx => { const info = await ctx.services.request('library/info', {}); ctx.notify(`SlideSCI Mac ${info.version} · Windows原版 ${info.upstreamVersion}`); return info; } },
-  { id: 'export.about', label: '关于开发者', section: '设置与帮助', run: ctx => { const info = { developer: 'Achuan-2', email: 'achuan-2@outlook.com', github: 'https://github.com/Achuan-2' }; ctx.notify(`开发者：${info.developer}；邮箱：${info.email}；GitHub：${info.github}`); return info; } }
+  { id: 'export.about', label: '关于', section: '设置与帮助', run: ctx => { ctx.notify(`${maintainer}。Mac 版问题反馈：${links.feedback}`); return { maintainer, feedback: links.feedback, upstream: links.developer }; } }
 ];
 export const panels = [{ id: 'export.options', label: '导出与设置', section: '导出', mount: async (container, ctx) => {
   const lifetime = new AbortController(); const { signal } = lifetime; const options = await defaults(ctx);
@@ -127,7 +132,7 @@ export const panels = [{ id: 'export.options', label: '导出与设置', section
     button('保存默认设置', async () => { const value = Number(dpi.control.value); if (!Number.isFinite(value) || value < 36 || value > 2400) throw new Error('DPI必须介于36与2400之间。'); for (const [key, setting] of Object.entries({ format: format.control.value, dpi: value, separatePdf: separate.control.checked, openFolder: open.control.checked })) await ctx.settings.set(`export.${key}`, setting); status.textContent = '默认设置已保存。'; }, ctx, signal), status
   );
   const about = await ctx.services.request('library/info', {});
-  root.append(element('p', `SlideSCI Mac ${about.version} · Windows原版 ${about.upstreamVersion}`), element('p', '开发者：Achuan-2 · achuan-2@outlook.com'));
-  for (const [name, url] of Object.entries(links)) root.append(button(({ github: 'GitHub', help: '使用文档', developer: '开发者主页', sponsor: '赞助开发者' })[name], () => ctx.services.openExternal(url), ctx, signal));
+  root.append(element('p', `SlideSCI Mac ${about.version} · Windows原版 ${about.upstreamVersion}`), element('p', maintainer));
+  for (const [name, url] of Object.entries(links)) root.append(button(linkLabels[name], () => ctx.services.openExternal(url), ctx, signal));
   container.append(root); return () => { lifetime.abort(); root.remove(); };
 } }];

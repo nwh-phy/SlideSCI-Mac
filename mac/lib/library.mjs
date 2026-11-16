@@ -149,7 +149,7 @@ function archivePath(value) {
 export const libraryHandlers = {
   info: async () => {
     const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
-    return { name: 'SlideSCI Mac', version: pkg.version, upstreamVersion: '2.2.4.0', developer: 'Achuan-2', email: 'achuan-2@outlook.com' };
+    return { name: 'SlideSCI Mac', version: pkg.version, upstreamVersion: '2.2.4.0', maintainer: 'nwh-phy', feedback: 'https://github.com/nwh-phy/SlideSCI-Mac/issues', developer: 'Achuan-2' };
   },
   list: (input, env) => store(env, state => listing(state, input)),
   get: (input, env) => store(env, async ({ root, db }) => {
