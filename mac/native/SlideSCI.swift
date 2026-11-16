@@ -178,8 +178,11 @@ do {
         }
         signal(SIGTERM, SIG_IGN)
         let stopSignal = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        stopSignal.setEventHandler { for (name, saved) in pendingRestores { let pb = NSPasteboard(name: NSPasteboard.Name(name)); if pb.changeCount == saved.count { restore(saved.items, pb) } }; exit(0) }; stopSignal.resume()
-        let timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in capture(board, "clipboard"); capture(NSPasteboard(name: .drag), "drag") }
+        func finish() -> Never { for (name, saved) in pendingRestores { let pb = NSPasteboard(name: NSPasteboard.Name(name)); if pb.changeCount == saved.count { restore(saved.items, pb) } }; exit(0) }
+        // The watcher must not outlive the service: a killed or crashed parent re-parents it to launchd.
+        let parent = getppid()
+        stopSignal.setEventHandler { finish() }; stopSignal.resume()
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in if getppid() != parent { finish() }; capture(board, "clipboard"); capture(NSPasteboard(name: .drag), "drag") }
         let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp, .rightMouseUp]) { _ in if let id = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, hosts.contains(id) { capture(NSPasteboard(name: .drag), "drop"); json(["type": "hostChanged", "reason": "mouseUp", "host": id]) } }
         let observer = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { _ in if let id = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, hosts.contains(id) { json(["type": "hostChanged", "reason": "activation", "host": id]) } }
         _ = (timer, monitor, observer, stopSignal)

@@ -1271,10 +1271,18 @@ export function connectWps(services = {}) {
                 break;
               }
               case 'delete': {
-                for (const id of command.ids || []) {
-                  const entry = resolveEntry(slide, id, remap);
-                  if (!entry) throw new Error(`WPS 当前页面中找不到对象 ${id}，请重新选择。`);
-                  entry.shape.Delete();
+                // A shape whose group is deleted in the same command goes with the group; looking it
+                // up afterwards would fail half way (rollbacks list a new group and its children).
+                const nodes = new Map(geometryTree(slide).map(node => [node.id, node]));
+                const requested = (command.ids || []).map(id => String(remap.get(String(id)) || id));
+                const wanted = new Set(requested);
+                for (const id of requested) {
+                  if (!nodes.has(id)) throw new Error(`WPS 当前页面中找不到对象 ${id}，请重新选择。`);
+                }
+                for (const id of requested) {
+                  const node = nodes.get(id);
+                  if (node.ancestors.some(ancestor => wanted.has(ancestor))) continue;
+                  node.native.Delete();
                 }
                 touched = true;
                 break;

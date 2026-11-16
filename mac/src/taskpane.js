@@ -793,6 +793,14 @@ async function runAction(action, card, controls) {
       return;
     }
     persistAction(action, values);
+    if (result?.formValues && typeof result.formValues === 'object') {
+      for (const control of controls) {
+        if (!Object.prototype.hasOwnProperty.call(result.formValues, control.field.name) || !control.input) continue;
+        if (control.field.type === 'checkbox') control.input.checked = Boolean(result.formValues[control.field.name]);
+        else control.input.value = String(result.formValues[control.field.name]);
+      }
+      persistAction(action, { ...values, ...result.formValues });
+    }
     if (!notified) {
       const message = typeof result?.message === 'string' && result.message.trim()
         ? result.message

@@ -1,7 +1,8 @@
 import sharp from 'sharp';
 import UTIF from 'utif';
 import { DOMParser } from '@xmldom/xmldom';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
 const units = { nm: .001, um: 1, 'μm': 1, micron: 1, microns: 1, micrometer: 1, micrometers: 1, micrometre: 1, micrometres: 1, mm: 1000, millimeter: 1000, millimeters: 1000, cm: 10000, centimeter: 10000, centimeters: 10000, m: 1e6, meter: 1e6, meters: 1e6, in: 25400, inch: 25400, inches: 25400, nanometer: .001, nanometers: .001 };
@@ -184,9 +185,29 @@ async function normalize(input, env) {
   }
   return { ...output, source: input.path || input.source || null, name: input.name || (input.path ? path.basename(input.path) : '图片.png') };
 }
+// PowerPoint stores a picture shrunk inside its frame as negative crop; the uncovered area is transparent.
+async function paddedCrop(bytes, metadata, crop) {
+  const w = metadata.width, h = metadata.height;
+  const left = Math.round((crop.left || 0) * w), top = Math.round((crop.top || 0) * h);
+  const right = Math.round((crop.right || 0) * w), bottom = Math.round((crop.bottom || 0) * h);
+  if (w - left - right < 1 || h - top - bottom < 1) throw new Error('图片裁剪范围无效。');
+  const x = Math.max(0, left), y = Math.max(0, top), x2 = Math.min(w, w - right), y2 = Math.min(h, h - bottom);
+  if (x2 <= x || y2 <= y) throw new Error('图片裁剪范围无效。');
+  const { data, info } = await sharp(bytes, { page: 0, pages: 1 }).extract({ left: x, top: y, width: x2 - x, height: y2 - y }).ensureAlpha()
+    .extend({ left: Math.max(0, -left), top: Math.max(0, -top), right: Math.max(0, -right), bottom: Math.max(0, -bottom), background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .raw().toBuffer({ resolveWithObject: true });
+  return sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } });
+}
 async function raster(input, env, target) {
-  const bytes = await inputBytes(input, env), image = sharp(bytes, { page: 0, pages: 1 });
+  const bytes = await inputBytes(input, env);
+  let image = sharp(bytes, { page: 0, pages: 1 });
   const metadata = await image.metadata(), crop = input.crop || {};
+  if (['left', 'top', 'right', 'bottom'].some(side => (crop[side] || 0) < 0)) {
+    image = await paddedCrop(bytes, metadata, crop);
+    if (target) image.resize(target.width, target.height, { fit: 'fill' });
+    else image.resize({ width: input.maximum || 4096, height: input.maximum || 4096, fit: 'inside', withoutEnlargement: true });
+    return image.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  }
   const left = Math.round((crop.left || 0) * metadata.width), top = Math.round((crop.top || 0) * metadata.height);
   const width = Math.round(metadata.width * (1 - (crop.left || 0) - (crop.right || 0))), height = Math.round(metadata.height * (1 - (crop.top || 0) - (crop.bottom || 0)));
   if (width < 1 || height < 1 || left < 0 || top < 0 || left + width > metadata.width || top + height > metadata.height) throw new Error('图片裁剪范围无效。');
@@ -255,12 +276,41 @@ async function crop(input, env) {
   if (!overlap) throw new Error('放大矩形与原图没有重叠。');
   return encoded(output, width, height);
 }
-async function settings(input, env) {
-  await mkdir(env.storageDir, { recursive: true });
-  const filename = path.join(env.storageDir, 'images-settings.json');
-  let saved = {};
-  try { saved = JSON.parse(await readFile(filename, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  if (input.values) { saved = { ...saved, ...input.values }; await writeFile(filename, JSON.stringify(saved), { mode: 0o600 }); }
-  return saved;
+// Settings writes are serialized and atomic: concurrent read-modify-write calls (pseudo-color,
+// scale bar and zoom all save here) must not drop each other's values or leave a torn file.
+let settingsQueue = Promise.resolve();
+function settings(input, env) {
+  const task = settingsQueue.then(async () => {
+    await mkdir(env.storageDir, { recursive: true });
+    const filename = path.join(env.storageDir, 'images-settings.json');
+    let saved = {};
+    try {
+      const parsed = JSON.parse(await readFile(filename, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) saved = parsed;
+    } catch (error) {
+      if (error.code !== 'ENOENT') await rename(filename, `${filename}.corrupt-${Date.now()}`).catch(() => {});
+    }
+    if (input.values && typeof input.values === 'object') {
+      saved = { ...saved, ...input.values };
+      const temporary = `${filename}.${randomUUID()}.tmp`;
+      try { await writeFile(temporary, JSON.stringify(saved), { mode: 0o600 }); await rename(temporary, filename); }
+      finally { await rm(temporary, { force: true }); }
+    }
+    return saved;
+  });
+  settingsQueue = task.catch(() => {});
+  return task;
 }
-export const imageHandlers = { normalize, color, merge, crop, settings, fov: async (input, env) => { const bytes = await inputBytes(input, env); return tiffFov(firstTiffTags(bytes).tags); } };
+// Only the calibration numbers leave the service, so a source path recorded in the document is read
+// even when this service session has not granted it (for example after a restart).
+async function fovBytes(input, env) {
+  try { return await inputBytes(input, env); }
+  catch (error) {
+    const target = typeof input.path === 'string' && path.isAbsolute(input.path) && !/[\0\r\n]/.test(input.path) ? input.path : null;
+    if (!target) throw error;
+    const info = await stat(target).catch(() => null);
+    if (!info?.isFile()) throw new Error('原始文件已不存在或已移动：' + target);
+    return readFile(target);
+  }
+}
+export const imageHandlers = { normalize, color, merge, crop, settings, fov: async (input, env) => { const bytes = await fovBytes(input, env); return tiffFov(firstTiffTags(bytes).tags); } };

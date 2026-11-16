@@ -31,7 +31,8 @@ function filePath(value) {
 }
 export async function createFileServices(env) {
   const storageDir = path.join(os.homedir(), 'Library', 'Application Support', 'SlideSCI Mac');
-  const workDir = path.join(os.tmpdir(), 'slidesci-mac-' + randomUUID());
+  // The PID lets a later service tell an abandoned work folder from one still in use.
+  const workDir = path.join(os.tmpdir(), `slidesci-mac-${process.pid}-${randomUUID()}`);
   const hostDirs = {
     powerpoint: path.join(os.homedir(), 'Library/Containers/com.microsoft.Powerpoint/Data/tmp/SlideSCI-Mac'),
     wps: path.join(os.homedir(), 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/tmp/SlideSCI-Mac')
@@ -48,20 +49,34 @@ export async function createFileServices(env) {
     return resolved;
   }
   // Register only existing host-owned caches, never entire application containers.
-  for (const host of Object.keys(hostDirs)) {
-    const container = path.dirname(path.dirname(hostDirs[host]));
-    if (await fs.stat(container).then(item => item.isDirectory(), () => false)) await hostDirectory(host);
-  }
+  await hostRoots();
   async function allowFile(value) {
     const resolved = await fs.realpath(filePath(typeof value === 'string' ? value : value.path));
     if (!(await fs.stat(resolved)).isFile()) throw new Error('选择的项目不是文件。');
     grantedFiles.add(resolved);
     return { path: resolved, name: path.basename(resolved), mime: mimeByExtension[path.extname(resolved).toLowerCase()] || 'application/octet-stream' };
   }
+  // A host container created after the service started is registered on first use. macOS may
+  // refuse access to another app's container until the user allows it; that must not stop the
+  // service, and the host operation that needs the cache reports the denial itself.
+  async function hostRoots() {
+    for (const host of Object.keys(hostDirs)) {
+      const container = path.dirname(path.dirname(hostDirs[host]));
+      try {
+        if (await fs.stat(container).then(item => item.isDirectory(), () => false)) await hostDirectory(host);
+      } catch (error) {
+        if (!['EPERM', 'EACCES'].includes(error.code)) throw error;
+        console.error(`SlideSCI 暂时无法访问 ${host} 的数据目录：${error.message}`);
+      }
+    }
+  }
   async function requireFile(value) {
     const resolved = await fs.realpath(filePath(value));
-    if (grantedFiles.has(resolved) || roots.some(root => contained(resolved, root))
-      || [...grantedFolders].some(root => contained(resolved, root))) return resolved;
+    const allowed = () => grantedFiles.has(resolved) || roots.some(root => contained(resolved, root))
+      || [...grantedFolders].some(root => contained(resolved, root));
+    if (allowed()) return resolved;
+    await hostRoots().catch(() => {});
+    if (allowed()) return resolved;
     throw new Error('请先通过文件选择器选择该文件。');
   }
   async function requireFolder(value) {
@@ -128,7 +143,7 @@ export async function createFileServices(env) {
   }
   async function reveal(value) {
     const resolved = filePath(typeof value === 'string' ? value : value.path);
-    await fs.stat(resolved);
+    await fs.stat(resolved).catch(() => { throw new Error('原始文件已不存在或已移动：' + resolved); });
     return env.native.reveal({ path: resolved });
   }
   const files = { read, materialize, write, chooseFiles, chooseFolder, reveal,
