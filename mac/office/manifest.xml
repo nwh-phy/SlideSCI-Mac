@@ -3,7 +3,7 @@
  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="TaskPaneApp">
   <Id>4f358224-91a0-4cd8-9cd0-4a65ee58b8a3</Id>
-  <Version>1.1.1.0</Version>
+  <Version>1.1.2.0</Version>
   <ProviderName>SlideSCI Mac</ProviderName>
   <DefaultLocale>zh-CN</DefaultLocale>
   <DisplayName DefaultValue="SlideSCI Mac"/>

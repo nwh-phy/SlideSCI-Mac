@@ -105,6 +105,7 @@ class EventStream {
     this.retry = null;
     this.attempt = 0;
     this.started = false;
+    this.failed = false;
   }
 
   subscribe(name, callback) {
@@ -143,7 +144,8 @@ class EventStream {
     clearTimeout(this.retry);
     let session;
     try {
-      session = await this.services.session();
+      // After a dropped stream the service may have restarted with a new token; never retry with a stale one.
+      session = await this.services.session(this.failed);
     } catch (error) {
       this.schedule(error.name === 'AbortError' ? 5000 : 3000);
       return;
@@ -152,7 +154,7 @@ class EventStream {
     let source;
     try {
       const url = this.services.path('/api/events?token=' + encodeURIComponent(session.token)
-        + '&host=' + encodeURIComponent(this.services.host));
+        + '&host=' + encodeURIComponent(this.services.host) + '&client=' + encodeURIComponent(this.services.clientId));
       source = new EventSource(url);
     } catch (error) {
       this.schedule(5000);
@@ -162,12 +164,14 @@ class EventStream {
     this.registered.clear();
     source.onopen = () => {
       this.connected = true;
+      this.failed = false;
       this.attempt = 0;
       this.services.emitDiagnostic('events-open');
     };
     source.onerror = () => {
       if (this.closed || this.source !== source) return;
       this.connected = false;
+      this.failed = true;
       source.close();
       this.source = null;
       this.schedule();
@@ -227,6 +231,9 @@ export class Services {
     this.baseUrl = String(baseUrl).replace(/\/+$/, '');
     this.version = null;
     this.token = null;
+    this.instance = null;
+    // Identifies this pane to the service, which ties the pane's watcher lease to its event stream.
+    this.clientId = (globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`).replace(/[^A-Za-z0-9_-]/g, '');
     this.sessionPromise = null;
     this.settings = new Settings();
     this.events = new EventStream(this);
@@ -282,6 +289,7 @@ export class Services {
       }
       this.version = body.version ?? null;
       this.token = body.token;
+      this.instance = body.instance ?? null;
       return body;
     })();
     return this.sessionPromise;
@@ -396,12 +404,6 @@ export class Services {
     return this.request('files/writeClipboard', { data, mime });
   }
 
-  async grantFiles(paths, { source = 'clipboard' } = {}) {
-    const values = (Array.isArray(paths) ? paths : [paths]).filter(path => typeof path === 'string' && path.startsWith('/'));
-    if (!values.length) return [];
-    return this.request('files/grant', { paths: values, values, source, host: this.host });
-  }
-
   async fonts() {
     const result = await this.request('native/fonts', {});
     return Array.isArray(result) ? result : result?.fonts || [];
@@ -420,7 +422,7 @@ export class Services {
   }
 
   async startWatcher({ interceptTIFF = false } = {}) {
-    const result = await this.request('native/watchStart', { host: this.host, interceptTIFF });
+    const result = await this.request('native/watchStart', { host: this.host, interceptTIFF, client: this.clientId });
     return result?.id ? result : null;
   }
 

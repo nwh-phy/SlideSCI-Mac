@@ -314,7 +314,8 @@ export function startScientificReconciliation(ctx, onError = error => ctx.servic
     } catch (error) { onError(error); }
     finally { busy = false; if (pending && !disposed) { pending = false; timer = setTimeout(run, 80); } }
   };
-  const schedule = () => { if (busy) pending = true; else { clearTimeout(timer); timer = setTimeout(run, 80); } };
+  // A selection change cannot move or restyle a linked picture; skip the full slide read it would cost.
+  const schedule = change => { if (change?.kind === 'selection') return; if (busy) pending = true; else { clearTimeout(timer); timer = setTimeout(run, 80); } };
   const unsubscribe = ctx.host.onChanged(schedule);
   reconcilers.set(ctx.host, state); schedule();
   return () => state.release();

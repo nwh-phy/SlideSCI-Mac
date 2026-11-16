@@ -6,7 +6,7 @@ import net from 'node:net';
 import https from 'node:https';
 import { lookup } from 'node:dns/promises';
 import { fileURLToPath } from 'node:url';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID, X509Certificate } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import { DOMParser, XMLSerializer } from '@xmldom/xmldom';
 
@@ -47,15 +47,31 @@ async function files(directory, prefix = '') {
   }
   return result.sort();
 }
+function processSignature(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  try { return run('/bin/ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'command=']).trim() || null; }
+  catch { return null; }
+}
+function ownsService(signature) {
+  return typeof signature === 'string' && signature.includes(path.join(application, 'runtime/bin/node'))
+    && signature.includes(path.join(application, 'mac/server.mjs'));
+}
+// The signature holds the start time and command line, so a mismatch proves the recorded
+// service is gone (reboot, logout, crash or PID reuse). Such a record is dropped without
+// signalling the process that now owns the PID.
+async function serviceRecord() {
+  if (!await exists(pidFile)) return null;
+  let record = null;
+  try { record = await json(pidFile); } catch { /* An unreadable record cannot identify a running service. */ }
+  const current = record ? processSignature(Number(record.pid)) : null;
+  if (record?.signature && current === record.signature && ownsService(current)) return record;
+  await fs.rm(pidFile, { force: true });
+  console.log('已清除过期的服务记录（电脑重启、服务退出或进程号已被其他程序使用）；未结束任何进程。');
+  return null;
+}
 async function stop() {
-  if (!await exists(pidFile)) return;
-  const record = await json(pidFile);
-  let signature;
-  try { signature = run('/bin/ps', ['-p', String(record.pid), '-o', 'lstart=', '-o', 'command=']).trim(); }
-  catch { await fs.rm(pidFile); return; }
-  if (!record.signature || signature !== record.signature || !signature.includes(path.join(application, 'runtime/bin/node')) || !signature.includes(path.join(application, 'mac/server.mjs'))) {
-    throw new Error('服务 PID 已不属于本安装，拒绝结束该进程。');
-  }
+  const record = await serviceRecord();
+  if (!record) { console.log('SlideSCI 本机服务未在运行。'); return; }
   process.kill(-record.pid, 'SIGTERM');
   const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
@@ -64,6 +80,26 @@ async function stop() {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw new Error('服务尚未退出；保留记录，不强制结束。');
+}
+// The service writes into each host's own cache; macOS asks before Terminal touches another app's
+// data. Probing here makes that prompt appear in this window and names a refusal plainly.
+const accessHelp = names => `macOS 拒绝“终端”访问 ${names.join('、')} 的数据，SlideSCI 的插入、格式与导出等功能将无法使用。出现“访问其他 App 的数据”提示时请选择允许；如果之前拒绝过，请在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”中打开“终端”，然后重新运行此命令。`;
+async function deniedHosts() {
+  const denied = [];
+  for (const [name, id] of [['PowerPoint', 'com.microsoft.Powerpoint'], ['WPS', 'com.kingsoft.wpsoffice.mac']]) {
+    const container = path.join(profile, 'Library/Containers', id, 'Data');
+    if (!await exists(container)) continue;
+    const directory = path.join(container, 'tmp/SlideSCI-Mac'), probe = path.join(directory, `.slidesci-access-${process.pid}`);
+    try { await fs.mkdir(directory, { recursive: true, mode: 0o700 }); await fs.writeFile(probe, ''); await fs.rm(probe, { force: true }); }
+    catch (error) { if (['EPERM', 'EACCES'].includes(error.code)) denied.push(name); }
+  }
+  return denied;
+}
+function permissionMessage(error) {
+  if (!['EPERM', 'EACCES'].includes(error?.code)) return error?.message;
+  const where = String(error.path || error.message);
+  const names = /com\.microsoft\.Powerpoint/i.test(where) ? ['PowerPoint'] : /kingsoft/i.test(where) ? ['WPS'] : null;
+  return names ? accessHelp(names) : error.message;
 }
 async function reserve(port, host) {
   const server = net.createServer(socket => socket.destroy());
@@ -88,15 +124,18 @@ function httpsSession(certificate) {
 }
 async function start() {
   if (!await exists(recordFile) || !await exists(path.join(application, 'BUILD-INFO.json'))) throw new Error('请先运行 Install.command。');
-  if (await exists(pidFile)) {
-    const record = await json(pidFile);
-    try {
-      if (run('/bin/ps', ['-p', String(record.pid), '-o', 'lstart=', '-o', 'command=']).trim() === record.signature) {
-        console.log('SlideSCI 本机服务已经运行。'); return;
-      }
-    } catch { /* Only a recorded dead process is discarded. */ }
-    throw new Error('服务记录过期或不匹配，请先运行 Stop.command 检查。');
+  if (await serviceRecord()) { console.log('SlideSCI 本机服务已经运行。'); return; }
+  const { days } = await certificateStatus();
+  if (days <= 0) {
+    console.log('PowerPoint 使用的本机证书已过期，正在生成新证书。');
+    await replaceCertificate();
+  } else if (days <= CERTIFICATE_RENEW_DAYS) {
+    console.log(`提醒：PowerPoint 使用的本机证书将在 ${Math.ceil(days)} 天后到期，到期后 PowerPoint 无法加载 SlideSCI。`);
+    console.log('可运行安装目录中的 RenewCertificate.command 提前生成新证书。');
   }
+  const trusted = await trustCertificate();
+  const denied = await deniedHosts();
+  if (denied.length) console.log('警告：' + accessHelp(denied));
   const certificate = await fs.readFile(path.join(state, 'tls/localhost.crt'));
   const reservations = [];
   try {
@@ -105,12 +144,16 @@ async function start() {
     reservations.push(await reserve(3000, '127.0.0.1'));
     for (const address of addresses) reservations.push(await reserve(3443, address));
   }
-  catch (error) { for (const close of reservations) await close(); throw new Error(`本机端口 3000 或 3443 已被占用，未启动其他服务：${error.code}`); }
+  catch (error) { for (const close of reservations) await close(); throw new Error(`本机端口 3000 或 3443 已被占用，未启动其他服务：${error.code || error.message}`); }
   for (const close of reservations) await close();
-  const log = await fs.open(path.join(state, 'service.log'), 'a', 0o600);
+  const logFile = path.join(state, 'service.log');
+  // Keep one previous log so a long-lived installation never grows the log without bound.
+  const logSize = await fs.stat(logFile).then(item => item.size, () => 0);
+  if (logSize > 5 * 1024 * 1024) await fs.rename(logFile, logFile + '.1');
+  const log = await fs.open(logFile, 'a', 0o600);
   const child = spawn(path.join(application, 'runtime/bin/node'), [path.join(application, 'mac/server.mjs'), '--cert', path.join(state, 'tls/localhost.crt'), '--key', path.join(state, 'tls/localhost.key')], {
     cwd: application, detached: true, stdio: ['ignore', log.fd, log.fd],
-    env: { ...process.env, NODE_OPTIONS: '', NODE_ENV: 'production', SLIDESCI_ACCEPTANCE: '', SLIDESCI_NATIVE_DEBUG: '' }
+    env: { ...process.env, NODE_OPTIONS: '', NODE_ENV: 'production', SLIDESCI_ACCEPTANCE: '', SLIDESCI_NATIVE_DEBUG: '', SLIDESCI_HTTP_PORT: '', SLIDESCI_HTTPS_PORT: '' }
   });
   let spawnError;
   child.on('error', error => { spawnError = error; });
@@ -129,7 +172,8 @@ async function start() {
           const signature = run('/bin/ps', ['-p', String(child.pid), '-o', 'lstart=', '-o', 'command=']).trim();
           await atomic(pidFile, JSON.stringify({ pid: child.pid, signature, root: application }));
           console.log('SlideSCI 已启动：WPS http://127.0.0.1:3000；PowerPoint https://localhost:3443。');
-          console.log('PowerPoint 需在本机信任安装时生成的 localhost 证书。'); return;
+          if (!trusted) console.log('本机证书尚未被信任：PowerPoint 暂时无法加载 SlideSCI，WPS 可以正常使用。');
+          console.log('电脑重启或注销后，请再次运行 Start.command。'); return;
         }
       } catch { /* The process is checked again until the startup deadline. */ }
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -137,16 +181,106 @@ async function start() {
     throw new Error('服务启动超时，请检查 service.log。');
   } catch (error) { try { process.kill(-child.pid, 'SIGTERM'); } catch {} throw error; }
 }
+// macOS rejects TLS server certificates valid for more than 825 days.
+const CERTIFICATE_DAYS = 825;
+const CERTIFICATE_RENEW_DAYS = 30;
+const tlsDirectory = () => path.join(state, 'tls');
 async function certificate() {
-  const directory = path.join(state, 'tls');
+  const directory = tlsDirectory();
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   const cert = path.join(directory, 'localhost.crt'), key = path.join(directory, 'localhost.key');
-  if (await exists(cert) && await exists(key)) return;
+  if (await exists(cert) && await exists(key)) return false;
   if (await exists(cert) || await exists(key)) throw new Error('本机 TLS 文件不完整，请先恢复成对的证书与私钥。');
   const config = path.join(directory, 'openssl.cnf');
-  await atomic(config, '[req]\ndistinguished_name=dn\nx509_extensions=extensions\nprompt=no\n[dn]\nCN=localhost\n[extensions]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n');
-  run('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '365', '-config', config, '-keyout', key, '-out', cert]);
+  await atomic(config, '[req]\ndistinguished_name=dn\nx509_extensions=extensions\nprompt=no\n[dn]\nCN=localhost\n[extensions]\nsubjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n');
+  run('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', String(CERTIFICATE_DAYS), '-config', config, '-keyout', key, '-out', cert]);
   await fs.chmod(key, 0o600); await fs.chmod(cert, 0o644);
+  return true;
+}
+async function certificateStatus() {
+  const file = path.join(tlsDirectory(), 'localhost.crt');
+  if (!await exists(file) || !await exists(path.join(tlsDirectory(), 'localhost.key'))) throw new Error('缺少 PowerPoint 使用的本机证书，请运行 RenewCertificate.command 重新生成。');
+  const expires = Date.parse(new X509Certificate(await fs.readFile(file)).validTo);
+  if (!Number.isFinite(expires)) throw new Error('无法读取本机证书的有效期，请运行 RenewCertificate.command 重新生成。');
+  return { expires, days: (expires - Date.now()) / 86400000 };
+}
+// The retired pair is kept beside the new one; the old trust setting is removed, the new one asked for.
+async function replaceCertificate() {
+  const directory = tlsDirectory(), retired = path.join(directory, `retired-${stamp()}`);
+  await fs.mkdir(retired, { recursive: true, mode: 0o700 });
+  for (const name of ['localhost.crt', 'localhost.key']) {
+    if (await exists(path.join(directory, name))) await fs.rename(path.join(directory, name), path.join(retired, name));
+  }
+  await certificate();
+  const { expires } = await certificateStatus();
+  console.log(`已生成新的本机证书，有效期至 ${new Date(expires).toLocaleDateString('zh-CN')}；旧证书移至 ${retired}。`);
+  await untrustCertificate(path.join(retired, 'localhost.crt'));
+  if (await trustCertificate()) console.log('请保存工作并重开 PowerPoint。');
+}
+async function renewCertificate() {
+  if (!await exists(recordFile)) throw new Error('请先运行 Install.command。');
+  const running = await serviceRecord();
+  if (running) await stop();
+  await replaceCertificate();
+  if (running) await start();
+  else console.log('需要使用时运行 Start.command。');
+}
+// PowerPoint loads the pane only over HTTPS that macOS trusts. With the user's consent the installer
+// lets macOS show its own authorization prompt and trusts this one localhost leaf certificate for SSL
+// only; it never creates a certificate authority. --trust-certificate yes|no answers the question
+// for managed installs; an isolated --profile never touches the signed-in user's trust settings.
+const securityTool = process.env.SLIDESCI_SECURITY_TOOL || '/usr/bin/security';
+const trustRecord = () => path.join(tlsDirectory(), 'trust.json');
+const loginKeychain = () => path.join(profile, 'Library/Keychains/login.keychain-db');
+const trustAvailable = () => profile === path.resolve(os.homedir()) || Boolean(process.env.SLIDESCI_SECURITY_TOOL);
+const fingerprint = pem => new X509Certificate(pem).fingerprint.replaceAll(':', '');
+function certificateTrusted(file) {
+  try { execFileSync(securityTool, ['verify-cert', '-c', file, '-p', 'ssl', '-n', 'localhost', '-L', '-q'], { stdio: 'ignore' }); return true; }
+  catch { return false; }
+}
+async function consent(question) {
+  const choice = option('--trust-certificate', null);
+  if (choice === 'yes') return true;
+  if (choice === 'no' || !process.stdin.isTTY) return false;
+  const { createInterface } = await import('node:readline/promises');
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try { return ['', 'y', 'yes', '是'].includes((await prompt.question(question + ' [Y/n] ')).trim().toLowerCase()); }
+  finally { prompt.close(); }
+}
+// Ask once per run: a renewal that restarts the service must not repeat a question just declined.
+let trustDeclined = false;
+function lastLine(error) { return String(error?.stderr || error?.message || error).trim().split('\n').at(-1); }
+async function trustCertificate() {
+  const file = path.join(tlsDirectory(), 'localhost.crt');
+  if (certificateTrusted(file)) return true;
+  const manual = () => console.log(`PowerPoint 需要信任本机证书才能加载 SlideSCI（WPS 不受影响）。可再次运行 Start.command 按提示信任，或用“钥匙串访问”导入 ${file} 并将其 SSL 设为始终信任。`);
+  if (!trustAvailable() || trustDeclined) { manual(); return false; }
+  if (!await consent('PowerPoint 只通过受 macOS 信任的 HTTPS 加载 SlideSCI。是否现在信任本机生成的 localhost 证书？它只用于本机 localhost 连接，私钥不离开这台 Mac；macOS 会弹出授权窗口，需要输入登录密码。')) {
+    trustDeclined = true; manual(); return false;
+  }
+  console.log('请在 macOS 弹出的授权窗口中输入登录密码……');
+  try { execFileSync(securityTool, ['add-trusted-cert', '-r', 'trustRoot', '-p', 'ssl', '-s', 'localhost', '-k', loginKeychain(), file], { stdio: ['ignore', 'pipe', 'pipe'] }); }
+  catch (error) { trustDeclined = true; console.log('未完成证书信任：' + lastLine(error)); manual(); return false; }
+  if (!certificateTrusted(file)) { console.log('macOS 仍未信任该证书。'); manual(); return false; }
+  await atomic(trustRecord(), JSON.stringify({ fingerprint: fingerprint(await fs.readFile(file)), keychain: loginKeychain(), trustedAt: new Date().toISOString() }, null, 2));
+  console.log('已信任 PowerPoint 使用的本机证书。');
+  return true;
+}
+// Removes only what trustCertificate added: the recorded certificate's keychain copy and its trust setting.
+async function untrustCertificate(file) {
+  if (!trustAvailable() || !await exists(trustRecord())) return;
+  let record;
+  try { record = await json(trustRecord()); } catch { return; }
+  const pem = await fs.readFile(file).catch(() => null);
+  if (!record?.fingerprint || (pem && fingerprint(pem) !== record.fingerprint)) return;
+  console.log('正在移除安装器添加的证书信任，macOS 可能弹出授权窗口……');
+  try {
+    execFileSync(securityTool, ['delete-certificate', '-Z', record.fingerprint, '-t', record.keychain || loginKeychain()], { stdio: ['ignore', 'pipe', 'pipe'] });
+    await fs.rm(trustRecord(), { force: true });
+    console.log('已移除旧证书及其信任设置。');
+  } catch (error) {
+    console.log(`未能移除旧证书信任：${lastLine(error)}。可在“钥匙串访问”中删除 SHA-1 指纹为 ${record.fingerprint} 的 localhost 证书。`);
+  }
 }
 async function registrations() {
   const result = [];
@@ -196,7 +330,7 @@ async function install() {
   if (!await exists(path.join(root, 'BUILD-INFO.json')) || !await exists(path.join(root, 'runtime/bin/node'))) throw new Error('请先构建并解压发行 ZIP，再运行 Install.command。');
   if (await exists(recordFile)) throw new Error('已有本安装器版本，请先运行旧版本的 Uninstall.command；素材和设置会保留。');
   if (await exists(application)) throw new Error('目标目录已有未登记内容，未覆盖。');
-  if (await exists(pidFile)) throw new Error('存在旧服务记录，请先运行 Stop.command。');
+  if (await serviceRecord()) throw new Error('SlideSCI 服务仍在运行，请先运行 Stop.command。');
   const planned = await registrations();
   if (!planned.length) throw new Error('尚未找到 PowerPoint 或 WPS 的容器。请先安装并打开宿主一次。');
   await fs.mkdir(state, { recursive: true, mode: 0o700 });
@@ -216,8 +350,8 @@ async function install() {
     }
     await atomic(recordFile, JSON.stringify({ application, version: (await json(path.join(application, 'BUILD-INFO.json'))).version, registrations: installed }, null, 2));
     console.log('SlideSCI 已安装。注册宿主：' + installed.map(item => item.host).join('、'));
+    if (installed.some(item => item.host === 'powerpoint')) await trustCertificate();
     console.log('下一步：运行安装目录中的 Start.command，保存工作并重开宿主。');
-    console.log('PowerPoint 证书位于安装器状态目录 tls/localhost.crt；需自行导入并信任。安装器未修改钥匙串。');
   } catch (error) {
     for (const item of installed.reverse()) await restoreRegistration(item);
     if (moved) await fs.rename(application, `${application}.failed-${stamp()}`);
@@ -233,8 +367,9 @@ async function uninstall() {
   for (const item of [...record.registrations].reverse()) await restoreRegistration(item);
   if (await exists(application)) await fs.rename(application, `${application}.uninstalled-${stamp()}`);
   await fs.rename(recordFile, path.join(state, `uninstalled-${stamp()}.json`));
+  await untrustCertificate(path.join(tlsDirectory(), 'localhost.crt'));
   console.log('已移除本安装的加载项注册并恢复原有记录。程序移入相邻 .uninstalled 备份目录。');
-  console.log('素材、设置、钥匙串密钥、本机证书和安装器备份均保留。');
+  console.log('素材、设置、AI 密钥和安装器备份均保留；证书文件保留在安装器状态目录，重装时会再次询问是否信任。');
 }
 async function prunePackages(directory) {
   const excluded = new Set(['.bin', 'test', 'tests', '__tests__', 'fixtures', 'examples', 'example', 'benchmark', 'benchmarks', 'coverage']);
@@ -292,7 +427,7 @@ async function build() {
     console.log('正在编译随包分发的原生辅助程序。');
     run('/usr/bin/xcrun', ['swiftc', '-O', '-swift-version', '5', '-target', 'arm64-apple-macos14.0', '-debug-prefix-map', `${root}=/SlideSCI`, path.join(payload, 'mac/native/SlideSCI.swift'), '-o', path.join(payload, 'mac/bin/slidesci-native'), '-framework', 'AppKit', '-framework', 'Security', '-framework', 'PDFKit', '-framework', 'CoreImage', '-framework', 'ApplicationServices', '-framework', 'AVFoundation', '-framework', 'UniformTypeIdentifiers']);
     await fs.chmod(path.join(payload, 'mac/bin/slidesci-native'), 0o755);
-    for (const [name, command] of Object.entries({ Install: 'install', Start: 'start', Stop: 'stop', Uninstall: 'uninstall' })) {
+    for (const [name, command] of Object.entries({ Install: 'install', Start: 'start', Stop: 'stop', Uninstall: 'uninstall', RenewCertificate: 'renew-certificate' })) {
       const text = '#!/bin/bash\nset -euo pipefail\nif [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then echo "此安装包仅适用于 Apple Silicon Mac。"; exit 1; fi\nTASK_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexec "$TASK_ROOT/runtime/bin/node" "$TASK_ROOT/mac/scripts/distribution.mjs" ' + command + ' "$@"\n';
       await atomic(path.join(payload, `${name}.command`), text, 0o755);
     }
@@ -314,5 +449,6 @@ try {
   else if (action === 'start') await start();
   else if (action === 'stop') await stop();
   else if (action === 'uninstall') await uninstall();
-  else throw new Error('使用：distribution.mjs build|install|start|stop|uninstall [--profile 隔离测试目录] [--output 构建目录]');
-} catch (error) { console.error(error.message); process.exitCode = 1; }
+  else if (action === 'renew-certificate') await renewCertificate();
+  else throw new Error('使用：distribution.mjs build|install|start|stop|uninstall|renew-certificate [--profile 隔离测试目录] [--output 构建目录] [--trust-certificate yes|no]');
+} catch (error) { console.error(permissionMessage(error)); process.exitCode = 1; }
