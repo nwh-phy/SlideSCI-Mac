@@ -1,0 +1,27 @@
+{
+  "name": "slidesci-mac",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "icons": "node scripts/ribbon-icons.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@xmldom/xmldom": "0.9.12",
+    "highlight.js": "11.12.0",
+    "jszip": "3.10.2",
+    "marked": "18.2.0",
+    "pptxgenjs": "4.0.1",
+    "sharp": "0.35.5",
+    "utif": "3.1.0"
+  },
+  "devDependencies": {
+    "@phosphor-icons/core": "2.1.1",
+    "@types/office-js": "1.0.617"
+  }
+}

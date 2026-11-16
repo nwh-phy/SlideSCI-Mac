@@ -1,0 +1,832 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+ xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="TaskPaneApp">
+  <Id>4f358224-91a0-4cd8-9cd0-4a65ee58b8a3</Id>
+  <Version>1.1.0.0</Version>
+  <ProviderName>SlideSCI Mac</ProviderName>
+  <DefaultLocale>zh-CN</DefaultLocale>
+  <DisplayName DefaultValue="SlideSCI Mac"/>
+  <Description DefaultValue="SlideSCI 科研排图、图片标注、内容插入、素材库与 AI 助手"/>
+  <IconUrl DefaultValue="https://localhost:3443/assets/icon32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://localhost:3443/assets/icon64.png"/>
+  <SupportUrl DefaultValue="https://github.com/nwh-phy/SlideSCI-Mac/issues"/>
+  <Hosts><Host Name="Presentation"/></Hosts>
+  <Requirements><Sets DefaultMinVersion="1.1"><Set Name="PowerPointApi" MinVersion="1.10"/><Set Name="SharedRuntime" MinVersion="1.1"/></Sets></Requirements>
+  <DefaultSettings><SourceLocation DefaultValue="https://localhost:3443/taskpane.html?host=powerpoint"/></DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Requirements><bt:Sets DefaultMinVersion="1.1"><bt:Set Name="SharedRuntime" MinVersion="1.1"/></bt:Sets></Requirements>
+    <Hosts>
+      <Host xsi:type="Presentation">
+        <Runtimes><Runtime resid="Taskpane.Url" lifetime="long"/></Runtimes>
+        <DesktopFormFactor>
+          <FunctionFile resid="Taskpane.Url"/>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <CustomTab id="SlideSCI.Tab">
+              <Group id="SlideSCI.ArrangeGroup">
+                <Label resid="Grp.Arrange"/>
+                <Icon><bt:Image size="16" resid="Img.Arrange.16"/><bt:Image size="32" resid="Img.Arrange.32"/><bt:Image size="80" resid="Img.Arrange.80"/></Icon>
+                <Control xsi:type="Button" id="SlideSCI.Arrange">
+                  <Label resid="Btn.Arrange.Label"/>
+                  <Supertip><Title resid="Btn.Arrange.Tip"/><Description resid="Btn.Arrange.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.Arrange.16"/><bt:Image size="32" resid="Img.Arrange.32"/><bt:Image size="80" resid="Img.Arrange.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIArrangeImages</FunctionName></Action>
+                </Control>
+                <Control xsi:type="Menu" id="SlideSCI.AlignMenu">
+                  <Label resid="Mnu.Align.Label"/>
+                  <Supertip><Title resid="Mnu.Align.Tip"/><Description resid="Mnu.Align.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.AlignMenu.16"/><bt:Image size="32" resid="Img.AlignMenu.32"/><bt:Image size="80" resid="Img.AlignMenu.80"/></Icon>
+                  <Items>
+                    <Item id="SlideSCI.AlignLeft">
+                      <Label resid="It.Left"/>
+                      <Supertip><Title resid="It.Left"/><Description resid="It.Left.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.AlignLeft.16"/><bt:Image size="32" resid="Img.AlignLeft.32"/><bt:Image size="80" resid="Img.AlignLeft.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIAlignLeft</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.AlignHorizontalCenter">
+                      <Label resid="It.HCenter"/>
+                      <Supertip><Title resid="It.HCenter"/><Description resid="It.HCenter.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.AlignHorizontalCenter.16"/><bt:Image size="32" resid="Img.AlignHorizontalCenter.32"/><bt:Image size="80" resid="Img.AlignHorizontalCenter.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIAlignHorizontalCenter</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.AlignRight">
+                      <Label resid="It.Right"/>
+                      <Supertip><Title resid="It.Right"/><Description resid="It.Right.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.AlignRight.16"/><bt:Image size="32" resid="Img.AlignRight.32"/><bt:Image size="80" resid="Img.AlignRight.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIAlignRight</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.AlignTop">
+                      <Label resid="It.Top"/>
+                      <Supertip><Title resid="It.Top"/><Description resid="It.Top.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.AlignTop.16"/><bt:Image size="32" resid="Img.AlignTop.32"/><bt:Image size="80" resid="Img.AlignTop.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIAlignTop</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.AlignVerticalCenter">
+                      <Label resid="It.VCenter"/>
+                      <Supertip><Title resid="It.VCenter"/><Description resid="It.VCenter.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.AlignVerticalCenter.16"/><bt:Image size="32" resid="Img.AlignVerticalCenter.32"/><bt:Image size="80" resid="Img.AlignVerticalCenter.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIAlignVerticalCenter</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.AlignBottom">
+                      <Label resid="It.Bottom"/>
+                      <Supertip><Title resid="It.Bottom"/><Description resid="It.Bottom.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.AlignBottom.16"/><bt:Image size="32" resid="Img.AlignBottom.32"/><bt:Image size="80" resid="Img.AlignBottom.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIAlignBottom</FunctionName></Action>
+                    </Item>
+                  </Items>
+                </Control>
+                <Control xsi:type="Menu" id="SlideSCI.SizeMenu">
+                  <Label resid="Mnu.Size.Label"/>
+                  <Supertip><Title resid="Mnu.Size.Tip"/><Description resid="Mnu.Size.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.SizeMenu.16"/><bt:Image size="32" resid="Img.SizeMenu.32"/><bt:Image size="80" resid="Img.SizeMenu.80"/></Icon>
+                  <Items>
+                    <Item id="SlideSCI.SpacingHorizontal">
+                      <Label resid="It.SpaceH"/>
+                      <Supertip><Title resid="It.SpaceH"/><Description resid="It.SpaceH.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.SpacingHorizontal.16"/><bt:Image size="32" resid="Img.SpacingHorizontal.32"/><bt:Image size="80" resid="Img.SpacingHorizontal.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCISpacingHorizontal</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.SpacingVertical">
+                      <Label resid="It.SpaceV"/>
+                      <Supertip><Title resid="It.SpaceV"/><Description resid="It.SpaceV.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.SpacingVertical.16"/><bt:Image size="32" resid="Img.SpacingVertical.32"/><bt:Image size="80" resid="Img.SpacingVertical.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCISpacingVertical</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.DistributeHorizontal">
+                      <Label resid="It.DistH"/>
+                      <Supertip><Title resid="It.DistH"/><Description resid="It.DistH.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.DistributeHorizontal.16"/><bt:Image size="32" resid="Img.DistributeHorizontal.32"/><bt:Image size="80" resid="Img.DistributeHorizontal.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIDistributeHorizontal</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.DistributeVertical">
+                      <Label resid="It.DistV"/>
+                      <Supertip><Title resid="It.DistV"/><Description resid="It.DistV.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.DistributeVertical.16"/><bt:Image size="32" resid="Img.DistributeVertical.32"/><bt:Image size="80" resid="Img.DistributeVertical.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIDistributeVertical</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.CopyDimensions">
+                      <Label resid="It.CopySize"/>
+                      <Supertip><Title resid="It.CopySize"/><Description resid="It.CopySize.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.CopyDimensions.16"/><bt:Image size="32" resid="Img.CopyDimensions.32"/><bt:Image size="80" resid="Img.CopyDimensions.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCICopyDimensions</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.PasteDimensions">
+                      <Label resid="It.PasteSize"/>
+                      <Supertip><Title resid="It.PasteSize"/><Description resid="It.PasteSize.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.PasteDimensions.16"/><bt:Image size="32" resid="Img.PasteDimensions.32"/><bt:Image size="80" resid="Img.PasteDimensions.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIPasteDimensions</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.CopyWidth">
+                      <Label resid="It.CopyW"/>
+                      <Supertip><Title resid="It.CopyW"/><Description resid="It.CopyW.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.CopyWidth.16"/><bt:Image size="32" resid="Img.CopyWidth.32"/><bt:Image size="80" resid="Img.CopyWidth.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCICopyWidth</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.PasteWidth">
+                      <Label resid="It.PasteW"/>
+                      <Supertip><Title resid="It.PasteW"/><Description resid="It.PasteW.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.PasteWidth.16"/><bt:Image size="32" resid="Img.PasteWidth.32"/><bt:Image size="80" resid="Img.PasteWidth.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIPasteWidth</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.CopyHeight">
+                      <Label resid="It.CopyH"/>
+                      <Supertip><Title resid="It.CopyH"/><Description resid="It.CopyH.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.CopyHeight.16"/><bt:Image size="32" resid="Img.CopyHeight.32"/><bt:Image size="80" resid="Img.CopyHeight.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCICopyHeight</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.PasteHeight">
+                      <Label resid="It.PasteH"/>
+                      <Supertip><Title resid="It.PasteH"/><Description resid="It.PasteH.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.PasteHeight.16"/><bt:Image size="32" resid="Img.PasteHeight.32"/><bt:Image size="80" resid="Img.PasteHeight.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIPasteHeight</FunctionName></Action>
+                    </Item>
+                  </Items>
+                </Control>
+                <Control xsi:type="Menu" id="SlideSCI.PositionMenu">
+                  <Label resid="Mnu.Position.Label"/>
+                  <Supertip><Title resid="Mnu.Position.Tip"/><Description resid="Mnu.Position.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.PositionMenu.16"/><bt:Image size="32" resid="Img.PositionMenu.32"/><bt:Image size="80" resid="Img.PositionMenu.80"/></Icon>
+                  <Items>
+                    <Item id="SlideSCI.CopyPosition">
+                      <Label resid="It.CopyPos"/>
+                      <Supertip><Title resid="It.CopyPos"/><Description resid="It.CopyPos.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.CopyPosition.16"/><bt:Image size="32" resid="Img.CopyPosition.32"/><bt:Image size="80" resid="Img.CopyPosition.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCICopyPosition</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.PastePosition">
+                      <Label resid="It.PastePos"/>
+                      <Supertip><Title resid="It.PastePos"/><Description resid="It.PastePos.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.PastePosition.16"/><bt:Image size="32" resid="Img.PastePosition.32"/><bt:Image size="80" resid="Img.PastePosition.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIPastePosition</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.SwapPosition">
+                      <Label resid="It.SwapPos"/>
+                      <Supertip><Title resid="It.SwapPos"/><Description resid="It.SwapPos.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.SwapPosition.16"/><bt:Image size="32" resid="Img.SwapPosition.32"/><bt:Image size="80" resid="Img.SwapPosition.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCISwapPosition</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.CopyRelativePosition">
+                      <Label resid="It.CopyRel"/>
+                      <Supertip><Title resid="It.CopyRel"/><Description resid="It.CopyRel.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.CopyRelativePosition.16"/><bt:Image size="32" resid="Img.CopyRelativePosition.32"/><bt:Image size="80" resid="Img.CopyRelativePosition.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCICopyRelativePosition</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.PasteRelativePosition">
+                      <Label resid="It.PasteRel"/>
+                      <Supertip><Title resid="It.PasteRel"/><Description resid="It.PasteRel.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.PasteRelativePosition.16"/><bt:Image size="32" resid="Img.PasteRelativePosition.32"/><bt:Image size="80" resid="Img.PasteRelativePosition.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIPasteRelativePosition</FunctionName></Action>
+                    </Item>
+                  </Items>
+                </Control>
+                <Control xsi:type="Menu" id="SlideSCI.FormatMenu">
+                  <Label resid="Mnu.Format.Label"/>
+                  <Supertip><Title resid="Mnu.Format.Tip"/><Description resid="Mnu.Format.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.FormatMenu.16"/><bt:Image size="32" resid="Img.FormatMenu.32"/><bt:Image size="80" resid="Img.FormatMenu.80"/></Icon>
+                  <Items>
+                    <Item id="SlideSCI.CopyShapeFormat">
+                      <Label resid="It.CopyShape"/>
+                      <Supertip><Title resid="It.CopyShape"/><Description resid="It.CopyShape.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.CopyShapeFormat.16"/><bt:Image size="32" resid="Img.CopyShapeFormat.32"/><bt:Image size="80" resid="Img.CopyShapeFormat.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCICopyShapeFormat</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.PasteShapeFormat">
+                      <Label resid="It.PasteShape"/>
+                      <Supertip><Title resid="It.PasteShape"/><Description resid="It.PasteShape.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.PasteShapeFormat.16"/><bt:Image size="32" resid="Img.PasteShapeFormat.32"/><bt:Image size="80" resid="Img.PasteShapeFormat.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIPasteShapeFormat</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.CopyTextFormat">
+                      <Label resid="It.CopyText"/>
+                      <Supertip><Title resid="It.CopyText"/><Description resid="It.CopyText.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.CopyTextFormat.16"/><bt:Image size="32" resid="Img.CopyTextFormat.32"/><bt:Image size="80" resid="Img.CopyTextFormat.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCICopyTextFormat</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.PasteTextFormat">
+                      <Label resid="It.PasteText"/>
+                      <Supertip><Title resid="It.PasteText"/><Description resid="It.PasteText.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.PasteTextFormat.16"/><bt:Image size="32" resid="Img.PasteTextFormat.32"/><bt:Image size="80" resid="Img.PasteTextFormat.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIPasteTextFormat</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.CopyGroupFormat">
+                      <Label resid="It.CopyGroup"/>
+                      <Supertip><Title resid="It.CopyGroup"/><Description resid="It.CopyGroup.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.CopyGroupFormat.16"/><bt:Image size="32" resid="Img.CopyGroupFormat.32"/><bt:Image size="80" resid="Img.CopyGroupFormat.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCICopyGroupFormat</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.PasteGroupFormat">
+                      <Label resid="It.PasteGroup"/>
+                      <Supertip><Title resid="It.PasteGroup"/><Description resid="It.PasteGroup.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.PasteGroupFormat.16"/><bt:Image size="32" resid="Img.PasteGroupFormat.32"/><bt:Image size="80" resid="Img.PasteGroupFormat.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIPasteGroupFormat</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.CopyCrop">
+                      <Label resid="It.CopyCrop"/>
+                      <Supertip><Title resid="It.CopyCrop"/><Description resid="It.CopyCrop.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.CopyCrop.16"/><bt:Image size="32" resid="Img.CopyCrop.32"/><bt:Image size="80" resid="Img.CopyCrop.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCICopyCrop</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.PasteCrop">
+                      <Label resid="It.PasteCrop"/>
+                      <Supertip><Title resid="It.PasteCrop"/><Description resid="It.PasteCrop.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.PasteCrop.16"/><bt:Image size="32" resid="Img.PasteCrop.32"/><bt:Image size="80" resid="Img.PasteCrop.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIPasteCrop</FunctionName></Action>
+                    </Item>
+                  </Items>
+                </Control>
+                <Control xsi:type="Menu" id="SlideSCI.TitlesMenu">
+                  <Label resid="Mnu.Titles.Label"/>
+                  <Supertip><Title resid="Mnu.Titles.Tip"/><Description resid="Mnu.Titles.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.TitlesMenu.16"/><bt:Image size="32" resid="Img.TitlesMenu.32"/><bt:Image size="80" resid="Img.TitlesMenu.80"/></Icon>
+                  <Items>
+                    <Item id="SlideSCI.TitlesBelow">
+                      <Label resid="It.TitleBelow"/>
+                      <Supertip><Title resid="It.TitleBelow"/><Description resid="It.TitleBelow.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.TitlesBelow.16"/><bt:Image size="32" resid="Img.TitlesBelow.32"/><bt:Image size="80" resid="Img.TitlesBelow.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCITitlesBelow</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.TitlesAbove">
+                      <Label resid="It.TitleAbove"/>
+                      <Supertip><Title resid="It.TitleAbove"/><Description resid="It.TitleAbove.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.TitlesAbove.16"/><bt:Image size="32" resid="Img.TitlesAbove.32"/><bt:Image size="80" resid="Img.TitlesAbove.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCITitlesAbove</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.Labels">
+                      <Label resid="It.Labels"/>
+                      <Supertip><Title resid="It.Labels"/><Description resid="It.Labels.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.Labels.16"/><bt:Image size="32" resid="Img.Labels.32"/><bt:Image size="80" resid="Img.Labels.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCILabels</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.UpdateLabels">
+                      <Label resid="It.UpdateLabels"/>
+                      <Supertip><Title resid="It.UpdateLabels"/><Description resid="It.UpdateLabels.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.UpdateLabels.16"/><bt:Image size="32" resid="Img.UpdateLabels.32"/><bt:Image size="80" resid="Img.UpdateLabels.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIUpdateLabels</FunctionName></Action>
+                    </Item>
+                  </Items>
+                </Control>
+              </Group>
+              <Group id="SlideSCI.ImagesGroup">
+                <Label resid="Grp.Images"/>
+                <Icon><bt:Image size="16" resid="Img.Insert.16"/><bt:Image size="32" resid="Img.Insert.32"/><bt:Image size="80" resid="Img.Insert.80"/></Icon>
+                <Control xsi:type="Button" id="SlideSCI.Insert">
+                  <Label resid="Btn.Insert.Label"/>
+                  <Supertip><Title resid="Btn.Insert.Tip"/><Description resid="Btn.Insert.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.Insert.16"/><bt:Image size="32" resid="Img.Insert.32"/><bt:Image size="80" resid="Img.Insert.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIInsertImages</FunctionName></Action>
+                </Control>
+                <Control xsi:type="Button" id="SlideSCI.PseudoColor">
+                  <Label resid="Btn.Pseudo.Label"/>
+                  <Supertip><Title resid="Btn.Pseudo.Tip"/><Description resid="Btn.Pseudo.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.PseudoColor.16"/><bt:Image size="32" resid="Img.PseudoColor.32"/><bt:Image size="80" resid="Img.PseudoColor.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIPseudoColor</FunctionName></Action>
+                </Control>
+                <Control xsi:type="Button" id="SlideSCI.MergeChannels">
+                  <Label resid="Btn.Merge.Label"/>
+                  <Supertip><Title resid="Btn.Merge.Tip"/><Description resid="Btn.Merge.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.MergeChannels.16"/><bt:Image size="32" resid="Img.MergeChannels.32"/><bt:Image size="80" resid="Img.MergeChannels.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIMergeChannels</FunctionName></Action>
+                </Control>
+                <Control xsi:type="Button" id="SlideSCI.RevealSource">
+                  <Label resid="Btn.Reveal.Label"/>
+                  <Supertip><Title resid="Btn.Reveal.Tip"/><Description resid="Btn.Reveal.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.RevealSource.16"/><bt:Image size="32" resid="Img.RevealSource.32"/><bt:Image size="80" resid="Img.RevealSource.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIRevealSource</FunctionName></Action>
+                </Control>
+                <Control xsi:type="Button" id="SlideSCI.PasteImages">
+                  <Label resid="Btn.Paste.Label"/>
+                  <Supertip><Title resid="Btn.Paste.Tip"/><Description resid="Btn.Paste.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.PasteImages.16"/><bt:Image size="32" resid="Img.PasteImages.32"/><bt:Image size="80" resid="Img.PasteImages.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIPasteImages</FunctionName></Action>
+                </Control>
+              </Group>
+              <Group id="SlideSCI.ScienceGroup">
+                <Label resid="Grp.Science"/>
+                <Icon><bt:Image size="16" resid="Img.ScaleBar.16"/><bt:Image size="32" resid="Img.ScaleBar.32"/><bt:Image size="80" resid="Img.ScaleBar.80"/></Icon>
+                <Control xsi:type="Button" id="SlideSCI.ScaleBar">
+                  <Label resid="Btn.Scale.Label"/>
+                  <Supertip><Title resid="Btn.Scale.Tip"/><Description resid="Btn.Scale.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.ScaleBar.16"/><bt:Image size="32" resid="Img.ScaleBar.32"/><bt:Image size="80" resid="Img.ScaleBar.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIScaleBar</FunctionName></Action>
+                </Control>
+                <Control xsi:type="Button" id="SlideSCI.ZoomImages">
+                  <Label resid="Btn.Zoom.Label"/>
+                  <Supertip><Title resid="Btn.Zoom.Tip"/><Description resid="Btn.Zoom.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.ZoomImages.16"/><bt:Image size="32" resid="Img.ZoomImages.32"/><bt:Image size="80" resid="Img.ZoomImages.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIZoomImages</FunctionName></Action>
+                </Control>
+                <Control xsi:type="Menu" id="SlideSCI.ScienceMenu">
+                  <Label resid="Mnu.Science.Label"/>
+                  <Supertip><Title resid="Mnu.Science.Tip"/><Description resid="Mnu.Science.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.ScienceMenu.16"/><bt:Image size="32" resid="Img.ScienceMenu.32"/><bt:Image size="80" resid="Img.ScienceMenu.80"/></Icon>
+                  <Items>
+                    <Item id="SlideSCI.SetFov">
+                      <Label resid="It.SetFov"/>
+                      <Supertip><Title resid="It.SetFov"/><Description resid="It.SetFov.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.SetFov.16"/><bt:Image size="32" resid="Img.SetFov.32"/><bt:Image size="80" resid="Img.SetFov.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCISetFov</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.ReadFov">
+                      <Label resid="It.ReadFov"/>
+                      <Supertip><Title resid="It.ReadFov"/><Description resid="It.ReadFov.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.ReadFov.16"/><bt:Image size="32" resid="Img.ReadFov.32"/><bt:Image size="80" resid="Img.ReadFov.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIReadFov</FunctionName></Action>
+                    </Item>
+                  </Items>
+                </Control>
+              </Group>
+              <Group id="SlideSCI.ContentGroup">
+                <Label resid="Grp.Content"/>
+                <Icon><bt:Image size="16" resid="Img.Markdown.16"/><bt:Image size="32" resid="Img.Markdown.32"/><bt:Image size="80" resid="Img.Markdown.80"/></Icon>
+                <Control xsi:type="Button" id="SlideSCI.Markdown">
+                  <Label resid="Btn.Markdown.Label"/>
+                  <Supertip><Title resid="Btn.Markdown.Tip"/><Description resid="Btn.Markdown.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.Markdown.16"/><bt:Image size="32" resid="Img.Markdown.32"/><bt:Image size="80" resid="Img.Markdown.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIMarkdown</FunctionName></Action>
+                </Control>
+                <Control xsi:type="Button" id="SlideSCI.Equation">
+                  <Label resid="Btn.Equation.Label"/>
+                  <Supertip><Title resid="Btn.Equation.Tip"/><Description resid="Btn.Equation.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.Equation.16"/><bt:Image size="32" resid="Img.Equation.32"/><bt:Image size="80" resid="Img.Equation.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIEquation</FunctionName></Action>
+                </Control>
+                <Control xsi:type="Menu" id="SlideSCI.ContentMenu">
+                  <Label resid="Mnu.Content.Label"/>
+                  <Supertip><Title resid="Mnu.Content.Tip"/><Description resid="Mnu.Content.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.ContentMenu.16"/><bt:Image size="32" resid="Img.ContentMenu.32"/><bt:Image size="80" resid="Img.ContentMenu.80"/></Icon>
+                  <Items>
+                    <Item id="SlideSCI.Code">
+                      <Label resid="It.Code"/>
+                      <Supertip><Title resid="It.Code"/><Description resid="It.Code.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.Code.16"/><bt:Image size="32" resid="Img.Code.32"/><bt:Image size="80" resid="Img.Code.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCICode</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.LatexSvg">
+                      <Label resid="It.LatexSvg"/>
+                      <Supertip><Title resid="It.LatexSvg"/><Description resid="It.LatexSvg.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.LatexSvg.16"/><bt:Image size="32" resid="Img.LatexSvg.32"/><bt:Image size="80" resid="Img.LatexSvg.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCILatexSvg</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.Svg">
+                      <Label resid="It.Svg"/>
+                      <Supertip><Title resid="It.Svg"/><Description resid="It.Svg.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.Svg.16"/><bt:Image size="32" resid="Img.Svg.32"/><bt:Image size="80" resid="Img.Svg.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCISvg</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.RichText">
+                      <Label resid="It.RichText"/>
+                      <Supertip><Title resid="It.RichText"/><Description resid="It.RichText.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.RichText.16"/><bt:Image size="32" resid="Img.RichText.32"/><bt:Image size="80" resid="Img.RichText.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIRichText</FunctionName></Action>
+                    </Item>
+                  </Items>
+                </Control>
+              </Group>
+              <Group id="SlideSCI.MediaGroup">
+                <Label resid="Grp.Media"/>
+                <Icon><bt:Image size="16" resid="Img.Library.16"/><bt:Image size="32" resid="Img.Library.32"/><bt:Image size="80" resid="Img.Library.80"/></Icon>
+                <Control xsi:type="Button" id="SlideSCI.Library">
+                  <Label resid="Btn.Library.Label"/>
+                  <Supertip><Title resid="Btn.Library.Tip"/><Description resid="Btn.Library.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.Library.16"/><bt:Image size="32" resid="Img.Library.32"/><bt:Image size="80" resid="Img.Library.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCILibrary</FunctionName></Action>
+                </Control>
+                <Control xsi:type="Button" id="SlideSCI.Export">
+                  <Label resid="Btn.Export.Label"/>
+                  <Supertip><Title resid="Btn.Export.Tip"/><Description resid="Btn.Export.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.Export.16"/><bt:Image size="32" resid="Img.Export.32"/><bt:Image size="80" resid="Img.Export.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIExport</FunctionName></Action>
+                </Control>
+                <Control xsi:type="Menu" id="SlideSCI.ExportMenu">
+                  <Label resid="Mnu.Export.Label"/>
+                  <Supertip><Title resid="Mnu.Export.Tip"/><Description resid="Mnu.Export.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.ExportMenu.16"/><bt:Image size="32" resid="Img.ExportMenu.32"/><bt:Image size="80" resid="Img.ExportMenu.80"/></Icon>
+                  <Items>
+                    <Item id="SlideSCI.ExportOriginal">
+                      <Label resid="It.ExportOriginal"/>
+                      <Supertip><Title resid="It.ExportOriginal"/><Description resid="It.ExportOriginal.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.ExportOriginal.16"/><bt:Image size="32" resid="Img.ExportOriginal.32"/><bt:Image size="80" resid="Img.ExportOriginal.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIExportOriginal</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.CopyOriginal">
+                      <Label resid="It.CopyOriginal"/>
+                      <Supertip><Title resid="It.CopyOriginal"/><Description resid="It.CopyOriginal.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.CopyOriginal.16"/><bt:Image size="32" resid="Img.CopyOriginal.32"/><bt:Image size="80" resid="Img.CopyOriginal.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCICopyOriginal</FunctionName></Action>
+                    </Item>
+                    <Item id="SlideSCI.CopySelection">
+                      <Label resid="It.CopySelection"/>
+                      <Supertip><Title resid="It.CopySelection"/><Description resid="It.CopySelection.Desc"/></Supertip>
+                      <Icon><bt:Image size="16" resid="Img.CopySelection.16"/><bt:Image size="32" resid="Img.CopySelection.32"/><bt:Image size="80" resid="Img.CopySelection.80"/></Icon>
+                      <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCICopySelection</FunctionName></Action>
+                    </Item>
+                  </Items>
+                </Control>
+                <Control xsi:type="Button" id="SlideSCI.LibrarySave">
+                  <Label resid="Btn.LibrarySave.Label"/>
+                  <Supertip><Title resid="Btn.LibrarySave.Tip"/><Description resid="Btn.LibrarySave.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.LibrarySave.16"/><bt:Image size="32" resid="Img.LibrarySave.32"/><bt:Image size="80" resid="Img.LibrarySave.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCILibrarySave</FunctionName></Action>
+                </Control>
+              </Group>
+              <Group id="SlideSCI.HelpGroup">
+                <Label resid="Grp.Help"/>
+                <Icon><bt:Image size="16" resid="Img.Assistant.16"/><bt:Image size="32" resid="Img.Assistant.32"/><bt:Image size="80" resid="Img.Assistant.80"/></Icon>
+                <Control xsi:type="Button" id="SlideSCI.Open">
+                  <Label resid="Btn.Open.Label"/>
+                  <Supertip><Title resid="Btn.Open.Tip"/><Description resid="Btn.Open.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.Open.16"/><bt:Image size="32" resid="Img.Open.32"/><bt:Image size="80" resid="Img.Open.80"/></Icon>
+                  <Action xsi:type="ShowTaskpane"><SourceLocation resid="Taskpane.Url"/></Action>
+                </Control>
+                <Control xsi:type="Button" id="SlideSCI.Assistant">
+                  <Label resid="Btn.Assistant.Label"/>
+                  <Supertip><Title resid="Btn.Assistant.Tip"/><Description resid="Btn.Assistant.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.Assistant.16"/><bt:Image size="32" resid="Img.Assistant.32"/><bt:Image size="80" resid="Img.Assistant.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIAssistant</FunctionName></Action>
+                </Control>
+                <Control xsi:type="Button" id="SlideSCI.Settings">
+                  <Label resid="Btn.Settings.Label"/>
+                  <Supertip><Title resid="Btn.Settings.Tip"/><Description resid="Btn.Settings.Desc"/></Supertip>
+                  <Icon><bt:Image size="16" resid="Img.Settings.16"/><bt:Image size="32" resid="Img.Settings.32"/><bt:Image size="80" resid="Img.Settings.80"/></Icon>
+                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCISettings</FunctionName></Action>
+                </Control>
+              </Group>
+              <Label resid="Tab.Label"/>
+            </CustomTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Img.Arrange.16" DefaultValue="https://localhost:3443/assets/ribbon/arrange-16.png"/>
+        <bt:Image id="Img.Arrange.32" DefaultValue="https://localhost:3443/assets/ribbon/arrange-32.png"/>
+        <bt:Image id="Img.Arrange.80" DefaultValue="https://localhost:3443/assets/ribbon/arrange-80.png"/>
+        <bt:Image id="Img.AlignMenu.16" DefaultValue="https://localhost:3443/assets/ribbon/align-menu-16.png"/>
+        <bt:Image id="Img.AlignMenu.32" DefaultValue="https://localhost:3443/assets/ribbon/align-menu-32.png"/>
+        <bt:Image id="Img.AlignMenu.80" DefaultValue="https://localhost:3443/assets/ribbon/align-menu-80.png"/>
+        <bt:Image id="Img.AlignLeft.16" DefaultValue="https://localhost:3443/assets/ribbon/align-left-16.png"/>
+        <bt:Image id="Img.AlignLeft.32" DefaultValue="https://localhost:3443/assets/ribbon/align-left-32.png"/>
+        <bt:Image id="Img.AlignLeft.80" DefaultValue="https://localhost:3443/assets/ribbon/align-left-80.png"/>
+        <bt:Image id="Img.AlignHorizontalCenter.16" DefaultValue="https://localhost:3443/assets/ribbon/align-horizontal-center-16.png"/>
+        <bt:Image id="Img.AlignHorizontalCenter.32" DefaultValue="https://localhost:3443/assets/ribbon/align-horizontal-center-32.png"/>
+        <bt:Image id="Img.AlignHorizontalCenter.80" DefaultValue="https://localhost:3443/assets/ribbon/align-horizontal-center-80.png"/>
+        <bt:Image id="Img.AlignRight.16" DefaultValue="https://localhost:3443/assets/ribbon/align-right-16.png"/>
+        <bt:Image id="Img.AlignRight.32" DefaultValue="https://localhost:3443/assets/ribbon/align-right-32.png"/>
+        <bt:Image id="Img.AlignRight.80" DefaultValue="https://localhost:3443/assets/ribbon/align-right-80.png"/>
+        <bt:Image id="Img.AlignTop.16" DefaultValue="https://localhost:3443/assets/ribbon/align-top-16.png"/>
+        <bt:Image id="Img.AlignTop.32" DefaultValue="https://localhost:3443/assets/ribbon/align-top-32.png"/>
+        <bt:Image id="Img.AlignTop.80" DefaultValue="https://localhost:3443/assets/ribbon/align-top-80.png"/>
+        <bt:Image id="Img.AlignVerticalCenter.16" DefaultValue="https://localhost:3443/assets/ribbon/align-vertical-center-16.png"/>
+        <bt:Image id="Img.AlignVerticalCenter.32" DefaultValue="https://localhost:3443/assets/ribbon/align-vertical-center-32.png"/>
+        <bt:Image id="Img.AlignVerticalCenter.80" DefaultValue="https://localhost:3443/assets/ribbon/align-vertical-center-80.png"/>
+        <bt:Image id="Img.AlignBottom.16" DefaultValue="https://localhost:3443/assets/ribbon/align-bottom-16.png"/>
+        <bt:Image id="Img.AlignBottom.32" DefaultValue="https://localhost:3443/assets/ribbon/align-bottom-32.png"/>
+        <bt:Image id="Img.AlignBottom.80" DefaultValue="https://localhost:3443/assets/ribbon/align-bottom-80.png"/>
+        <bt:Image id="Img.SizeMenu.16" DefaultValue="https://localhost:3443/assets/ribbon/size-menu-16.png"/>
+        <bt:Image id="Img.SizeMenu.32" DefaultValue="https://localhost:3443/assets/ribbon/size-menu-32.png"/>
+        <bt:Image id="Img.SizeMenu.80" DefaultValue="https://localhost:3443/assets/ribbon/size-menu-80.png"/>
+        <bt:Image id="Img.SpacingHorizontal.16" DefaultValue="https://localhost:3443/assets/ribbon/spacing-horizontal-16.png"/>
+        <bt:Image id="Img.SpacingHorizontal.32" DefaultValue="https://localhost:3443/assets/ribbon/spacing-horizontal-32.png"/>
+        <bt:Image id="Img.SpacingHorizontal.80" DefaultValue="https://localhost:3443/assets/ribbon/spacing-horizontal-80.png"/>
+        <bt:Image id="Img.SpacingVertical.16" DefaultValue="https://localhost:3443/assets/ribbon/spacing-vertical-16.png"/>
+        <bt:Image id="Img.SpacingVertical.32" DefaultValue="https://localhost:3443/assets/ribbon/spacing-vertical-32.png"/>
+        <bt:Image id="Img.SpacingVertical.80" DefaultValue="https://localhost:3443/assets/ribbon/spacing-vertical-80.png"/>
+        <bt:Image id="Img.DistributeHorizontal.16" DefaultValue="https://localhost:3443/assets/ribbon/distribute-horizontal-16.png"/>
+        <bt:Image id="Img.DistributeHorizontal.32" DefaultValue="https://localhost:3443/assets/ribbon/distribute-horizontal-32.png"/>
+        <bt:Image id="Img.DistributeHorizontal.80" DefaultValue="https://localhost:3443/assets/ribbon/distribute-horizontal-80.png"/>
+        <bt:Image id="Img.DistributeVertical.16" DefaultValue="https://localhost:3443/assets/ribbon/distribute-vertical-16.png"/>
+        <bt:Image id="Img.DistributeVertical.32" DefaultValue="https://localhost:3443/assets/ribbon/distribute-vertical-32.png"/>
+        <bt:Image id="Img.DistributeVertical.80" DefaultValue="https://localhost:3443/assets/ribbon/distribute-vertical-80.png"/>
+        <bt:Image id="Img.CopyDimensions.16" DefaultValue="https://localhost:3443/assets/ribbon/copy-dimensions-16.png"/>
+        <bt:Image id="Img.CopyDimensions.32" DefaultValue="https://localhost:3443/assets/ribbon/copy-dimensions-32.png"/>
+        <bt:Image id="Img.CopyDimensions.80" DefaultValue="https://localhost:3443/assets/ribbon/copy-dimensions-80.png"/>
+        <bt:Image id="Img.PasteDimensions.16" DefaultValue="https://localhost:3443/assets/ribbon/paste-dimensions-16.png"/>
+        <bt:Image id="Img.PasteDimensions.32" DefaultValue="https://localhost:3443/assets/ribbon/paste-dimensions-32.png"/>
+        <bt:Image id="Img.PasteDimensions.80" DefaultValue="https://localhost:3443/assets/ribbon/paste-dimensions-80.png"/>
+        <bt:Image id="Img.CopyWidth.16" DefaultValue="https://localhost:3443/assets/ribbon/copy-width-16.png"/>
+        <bt:Image id="Img.CopyWidth.32" DefaultValue="https://localhost:3443/assets/ribbon/copy-width-32.png"/>
+        <bt:Image id="Img.CopyWidth.80" DefaultValue="https://localhost:3443/assets/ribbon/copy-width-80.png"/>
+        <bt:Image id="Img.PasteWidth.16" DefaultValue="https://localhost:3443/assets/ribbon/paste-width-16.png"/>
+        <bt:Image id="Img.PasteWidth.32" DefaultValue="https://localhost:3443/assets/ribbon/paste-width-32.png"/>
+        <bt:Image id="Img.PasteWidth.80" DefaultValue="https://localhost:3443/assets/ribbon/paste-width-80.png"/>
+        <bt:Image id="Img.CopyHeight.16" DefaultValue="https://localhost:3443/assets/ribbon/copy-height-16.png"/>
+        <bt:Image id="Img.CopyHeight.32" DefaultValue="https://localhost:3443/assets/ribbon/copy-height-32.png"/>
+        <bt:Image id="Img.CopyHeight.80" DefaultValue="https://localhost:3443/assets/ribbon/copy-height-80.png"/>
+        <bt:Image id="Img.PasteHeight.16" DefaultValue="https://localhost:3443/assets/ribbon/paste-height-16.png"/>
+        <bt:Image id="Img.PasteHeight.32" DefaultValue="https://localhost:3443/assets/ribbon/paste-height-32.png"/>
+        <bt:Image id="Img.PasteHeight.80" DefaultValue="https://localhost:3443/assets/ribbon/paste-height-80.png"/>
+        <bt:Image id="Img.PositionMenu.16" DefaultValue="https://localhost:3443/assets/ribbon/position-menu-16.png"/>
+        <bt:Image id="Img.PositionMenu.32" DefaultValue="https://localhost:3443/assets/ribbon/position-menu-32.png"/>
+        <bt:Image id="Img.PositionMenu.80" DefaultValue="https://localhost:3443/assets/ribbon/position-menu-80.png"/>
+        <bt:Image id="Img.CopyPosition.16" DefaultValue="https://localhost:3443/assets/ribbon/copy-position-16.png"/>
+        <bt:Image id="Img.CopyPosition.32" DefaultValue="https://localhost:3443/assets/ribbon/copy-position-32.png"/>
+        <bt:Image id="Img.CopyPosition.80" DefaultValue="https://localhost:3443/assets/ribbon/copy-position-80.png"/>
+        <bt:Image id="Img.PastePosition.16" DefaultValue="https://localhost:3443/assets/ribbon/paste-position-16.png"/>
+        <bt:Image id="Img.PastePosition.32" DefaultValue="https://localhost:3443/assets/ribbon/paste-position-32.png"/>
+        <bt:Image id="Img.PastePosition.80" DefaultValue="https://localhost:3443/assets/ribbon/paste-position-80.png"/>
+        <bt:Image id="Img.SwapPosition.16" DefaultValue="https://localhost:3443/assets/ribbon/swap-position-16.png"/>
+        <bt:Image id="Img.SwapPosition.32" DefaultValue="https://localhost:3443/assets/ribbon/swap-position-32.png"/>
+        <bt:Image id="Img.SwapPosition.80" DefaultValue="https://localhost:3443/assets/ribbon/swap-position-80.png"/>
+        <bt:Image id="Img.CopyRelativePosition.16" DefaultValue="https://localhost:3443/assets/ribbon/copy-relative-position-16.png"/>
+        <bt:Image id="Img.CopyRelativePosition.32" DefaultValue="https://localhost:3443/assets/ribbon/copy-relative-position-32.png"/>
+        <bt:Image id="Img.CopyRelativePosition.80" DefaultValue="https://localhost:3443/assets/ribbon/copy-relative-position-80.png"/>
+        <bt:Image id="Img.PasteRelativePosition.16" DefaultValue="https://localhost:3443/assets/ribbon/paste-relative-position-16.png"/>
+        <bt:Image id="Img.PasteRelativePosition.32" DefaultValue="https://localhost:3443/assets/ribbon/paste-relative-position-32.png"/>
+        <bt:Image id="Img.PasteRelativePosition.80" DefaultValue="https://localhost:3443/assets/ribbon/paste-relative-position-80.png"/>
+        <bt:Image id="Img.FormatMenu.16" DefaultValue="https://localhost:3443/assets/ribbon/format-menu-16.png"/>
+        <bt:Image id="Img.FormatMenu.32" DefaultValue="https://localhost:3443/assets/ribbon/format-menu-32.png"/>
+        <bt:Image id="Img.FormatMenu.80" DefaultValue="https://localhost:3443/assets/ribbon/format-menu-80.png"/>
+        <bt:Image id="Img.CopyShapeFormat.16" DefaultValue="https://localhost:3443/assets/ribbon/copy-shape-format-16.png"/>
+        <bt:Image id="Img.CopyShapeFormat.32" DefaultValue="https://localhost:3443/assets/ribbon/copy-shape-format-32.png"/>
+        <bt:Image id="Img.CopyShapeFormat.80" DefaultValue="https://localhost:3443/assets/ribbon/copy-shape-format-80.png"/>
+        <bt:Image id="Img.PasteShapeFormat.16" DefaultValue="https://localhost:3443/assets/ribbon/paste-shape-format-16.png"/>
+        <bt:Image id="Img.PasteShapeFormat.32" DefaultValue="https://localhost:3443/assets/ribbon/paste-shape-format-32.png"/>
+        <bt:Image id="Img.PasteShapeFormat.80" DefaultValue="https://localhost:3443/assets/ribbon/paste-shape-format-80.png"/>
+        <bt:Image id="Img.CopyTextFormat.16" DefaultValue="https://localhost:3443/assets/ribbon/copy-text-format-16.png"/>
+        <bt:Image id="Img.CopyTextFormat.32" DefaultValue="https://localhost:3443/assets/ribbon/copy-text-format-32.png"/>
+        <bt:Image id="Img.CopyTextFormat.80" DefaultValue="https://localhost:3443/assets/ribbon/copy-text-format-80.png"/>
+        <bt:Image id="Img.PasteTextFormat.16" DefaultValue="https://localhost:3443/assets/ribbon/paste-text-format-16.png"/>
+        <bt:Image id="Img.PasteTextFormat.32" DefaultValue="https://localhost:3443/assets/ribbon/paste-text-format-32.png"/>
+        <bt:Image id="Img.PasteTextFormat.80" DefaultValue="https://localhost:3443/assets/ribbon/paste-text-format-80.png"/>
+        <bt:Image id="Img.CopyGroupFormat.16" DefaultValue="https://localhost:3443/assets/ribbon/copy-group-format-16.png"/>
+        <bt:Image id="Img.CopyGroupFormat.32" DefaultValue="https://localhost:3443/assets/ribbon/copy-group-format-32.png"/>
+        <bt:Image id="Img.CopyGroupFormat.80" DefaultValue="https://localhost:3443/assets/ribbon/copy-group-format-80.png"/>
+        <bt:Image id="Img.PasteGroupFormat.16" DefaultValue="https://localhost:3443/assets/ribbon/paste-group-format-16.png"/>
+        <bt:Image id="Img.PasteGroupFormat.32" DefaultValue="https://localhost:3443/assets/ribbon/paste-group-format-32.png"/>
+        <bt:Image id="Img.PasteGroupFormat.80" DefaultValue="https://localhost:3443/assets/ribbon/paste-group-format-80.png"/>
+        <bt:Image id="Img.CopyCrop.16" DefaultValue="https://localhost:3443/assets/ribbon/copy-crop-16.png"/>
+        <bt:Image id="Img.CopyCrop.32" DefaultValue="https://localhost:3443/assets/ribbon/copy-crop-32.png"/>
+        <bt:Image id="Img.CopyCrop.80" DefaultValue="https://localhost:3443/assets/ribbon/copy-crop-80.png"/>
+        <bt:Image id="Img.PasteCrop.16" DefaultValue="https://localhost:3443/assets/ribbon/paste-crop-16.png"/>
+        <bt:Image id="Img.PasteCrop.32" DefaultValue="https://localhost:3443/assets/ribbon/paste-crop-32.png"/>
+        <bt:Image id="Img.PasteCrop.80" DefaultValue="https://localhost:3443/assets/ribbon/paste-crop-80.png"/>
+        <bt:Image id="Img.TitlesMenu.16" DefaultValue="https://localhost:3443/assets/ribbon/titles-menu-16.png"/>
+        <bt:Image id="Img.TitlesMenu.32" DefaultValue="https://localhost:3443/assets/ribbon/titles-menu-32.png"/>
+        <bt:Image id="Img.TitlesMenu.80" DefaultValue="https://localhost:3443/assets/ribbon/titles-menu-80.png"/>
+        <bt:Image id="Img.TitlesBelow.16" DefaultValue="https://localhost:3443/assets/ribbon/titles-below-16.png"/>
+        <bt:Image id="Img.TitlesBelow.32" DefaultValue="https://localhost:3443/assets/ribbon/titles-below-32.png"/>
+        <bt:Image id="Img.TitlesBelow.80" DefaultValue="https://localhost:3443/assets/ribbon/titles-below-80.png"/>
+        <bt:Image id="Img.TitlesAbove.16" DefaultValue="https://localhost:3443/assets/ribbon/titles-above-16.png"/>
+        <bt:Image id="Img.TitlesAbove.32" DefaultValue="https://localhost:3443/assets/ribbon/titles-above-32.png"/>
+        <bt:Image id="Img.TitlesAbove.80" DefaultValue="https://localhost:3443/assets/ribbon/titles-above-80.png"/>
+        <bt:Image id="Img.Labels.16" DefaultValue="https://localhost:3443/assets/ribbon/labels-16.png"/>
+        <bt:Image id="Img.Labels.32" DefaultValue="https://localhost:3443/assets/ribbon/labels-32.png"/>
+        <bt:Image id="Img.Labels.80" DefaultValue="https://localhost:3443/assets/ribbon/labels-80.png"/>
+        <bt:Image id="Img.UpdateLabels.16" DefaultValue="https://localhost:3443/assets/ribbon/update-labels-16.png"/>
+        <bt:Image id="Img.UpdateLabels.32" DefaultValue="https://localhost:3443/assets/ribbon/update-labels-32.png"/>
+        <bt:Image id="Img.UpdateLabels.80" DefaultValue="https://localhost:3443/assets/ribbon/update-labels-80.png"/>
+        <bt:Image id="Img.Insert.16" DefaultValue="https://localhost:3443/assets/ribbon/insert-16.png"/>
+        <bt:Image id="Img.Insert.32" DefaultValue="https://localhost:3443/assets/ribbon/insert-32.png"/>
+        <bt:Image id="Img.Insert.80" DefaultValue="https://localhost:3443/assets/ribbon/insert-80.png"/>
+        <bt:Image id="Img.PseudoColor.16" DefaultValue="https://localhost:3443/assets/ribbon/pseudo-color-16.png"/>
+        <bt:Image id="Img.PseudoColor.32" DefaultValue="https://localhost:3443/assets/ribbon/pseudo-color-32.png"/>
+        <bt:Image id="Img.PseudoColor.80" DefaultValue="https://localhost:3443/assets/ribbon/pseudo-color-80.png"/>
+        <bt:Image id="Img.MergeChannels.16" DefaultValue="https://localhost:3443/assets/ribbon/merge-channels-16.png"/>
+        <bt:Image id="Img.MergeChannels.32" DefaultValue="https://localhost:3443/assets/ribbon/merge-channels-32.png"/>
+        <bt:Image id="Img.MergeChannels.80" DefaultValue="https://localhost:3443/assets/ribbon/merge-channels-80.png"/>
+        <bt:Image id="Img.RevealSource.16" DefaultValue="https://localhost:3443/assets/ribbon/reveal-source-16.png"/>
+        <bt:Image id="Img.RevealSource.32" DefaultValue="https://localhost:3443/assets/ribbon/reveal-source-32.png"/>
+        <bt:Image id="Img.RevealSource.80" DefaultValue="https://localhost:3443/assets/ribbon/reveal-source-80.png"/>
+        <bt:Image id="Img.PasteImages.16" DefaultValue="https://localhost:3443/assets/ribbon/paste-images-16.png"/>
+        <bt:Image id="Img.PasteImages.32" DefaultValue="https://localhost:3443/assets/ribbon/paste-images-32.png"/>
+        <bt:Image id="Img.PasteImages.80" DefaultValue="https://localhost:3443/assets/ribbon/paste-images-80.png"/>
+        <bt:Image id="Img.ScaleBar.16" DefaultValue="https://localhost:3443/assets/ribbon/scale-bar-16.png"/>
+        <bt:Image id="Img.ScaleBar.32" DefaultValue="https://localhost:3443/assets/ribbon/scale-bar-32.png"/>
+        <bt:Image id="Img.ScaleBar.80" DefaultValue="https://localhost:3443/assets/ribbon/scale-bar-80.png"/>
+        <bt:Image id="Img.ZoomImages.16" DefaultValue="https://localhost:3443/assets/ribbon/zoom-images-16.png"/>
+        <bt:Image id="Img.ZoomImages.32" DefaultValue="https://localhost:3443/assets/ribbon/zoom-images-32.png"/>
+        <bt:Image id="Img.ZoomImages.80" DefaultValue="https://localhost:3443/assets/ribbon/zoom-images-80.png"/>
+        <bt:Image id="Img.ScienceMenu.16" DefaultValue="https://localhost:3443/assets/ribbon/science-menu-16.png"/>
+        <bt:Image id="Img.ScienceMenu.32" DefaultValue="https://localhost:3443/assets/ribbon/science-menu-32.png"/>
+        <bt:Image id="Img.ScienceMenu.80" DefaultValue="https://localhost:3443/assets/ribbon/science-menu-80.png"/>
+        <bt:Image id="Img.SetFov.16" DefaultValue="https://localhost:3443/assets/ribbon/set-fov-16.png"/>
+        <bt:Image id="Img.SetFov.32" DefaultValue="https://localhost:3443/assets/ribbon/set-fov-32.png"/>
+        <bt:Image id="Img.SetFov.80" DefaultValue="https://localhost:3443/assets/ribbon/set-fov-80.png"/>
+        <bt:Image id="Img.ReadFov.16" DefaultValue="https://localhost:3443/assets/ribbon/read-fov-16.png"/>
+        <bt:Image id="Img.ReadFov.32" DefaultValue="https://localhost:3443/assets/ribbon/read-fov-32.png"/>
+        <bt:Image id="Img.ReadFov.80" DefaultValue="https://localhost:3443/assets/ribbon/read-fov-80.png"/>
+        <bt:Image id="Img.Markdown.16" DefaultValue="https://localhost:3443/assets/ribbon/markdown-16.png"/>
+        <bt:Image id="Img.Markdown.32" DefaultValue="https://localhost:3443/assets/ribbon/markdown-32.png"/>
+        <bt:Image id="Img.Markdown.80" DefaultValue="https://localhost:3443/assets/ribbon/markdown-80.png"/>
+        <bt:Image id="Img.Equation.16" DefaultValue="https://localhost:3443/assets/ribbon/equation-16.png"/>
+        <bt:Image id="Img.Equation.32" DefaultValue="https://localhost:3443/assets/ribbon/equation-32.png"/>
+        <bt:Image id="Img.Equation.80" DefaultValue="https://localhost:3443/assets/ribbon/equation-80.png"/>
+        <bt:Image id="Img.ContentMenu.16" DefaultValue="https://localhost:3443/assets/ribbon/content-menu-16.png"/>
+        <bt:Image id="Img.ContentMenu.32" DefaultValue="https://localhost:3443/assets/ribbon/content-menu-32.png"/>
+        <bt:Image id="Img.ContentMenu.80" DefaultValue="https://localhost:3443/assets/ribbon/content-menu-80.png"/>
+        <bt:Image id="Img.Code.16" DefaultValue="https://localhost:3443/assets/ribbon/code-16.png"/>
+        <bt:Image id="Img.Code.32" DefaultValue="https://localhost:3443/assets/ribbon/code-32.png"/>
+        <bt:Image id="Img.Code.80" DefaultValue="https://localhost:3443/assets/ribbon/code-80.png"/>
+        <bt:Image id="Img.LatexSvg.16" DefaultValue="https://localhost:3443/assets/ribbon/latex-svg-16.png"/>
+        <bt:Image id="Img.LatexSvg.32" DefaultValue="https://localhost:3443/assets/ribbon/latex-svg-32.png"/>
+        <bt:Image id="Img.LatexSvg.80" DefaultValue="https://localhost:3443/assets/ribbon/latex-svg-80.png"/>
+        <bt:Image id="Img.Svg.16" DefaultValue="https://localhost:3443/assets/ribbon/svg-16.png"/>
+        <bt:Image id="Img.Svg.32" DefaultValue="https://localhost:3443/assets/ribbon/svg-32.png"/>
+        <bt:Image id="Img.Svg.80" DefaultValue="https://localhost:3443/assets/ribbon/svg-80.png"/>
+        <bt:Image id="Img.RichText.16" DefaultValue="https://localhost:3443/assets/ribbon/rich-text-16.png"/>
+        <bt:Image id="Img.RichText.32" DefaultValue="https://localhost:3443/assets/ribbon/rich-text-32.png"/>
+        <bt:Image id="Img.RichText.80" DefaultValue="https://localhost:3443/assets/ribbon/rich-text-80.png"/>
+        <bt:Image id="Img.Library.16" DefaultValue="https://localhost:3443/assets/ribbon/library-16.png"/>
+        <bt:Image id="Img.Library.32" DefaultValue="https://localhost:3443/assets/ribbon/library-32.png"/>
+        <bt:Image id="Img.Library.80" DefaultValue="https://localhost:3443/assets/ribbon/library-80.png"/>
+        <bt:Image id="Img.Export.16" DefaultValue="https://localhost:3443/assets/ribbon/export-16.png"/>
+        <bt:Image id="Img.Export.32" DefaultValue="https://localhost:3443/assets/ribbon/export-32.png"/>
+        <bt:Image id="Img.Export.80" DefaultValue="https://localhost:3443/assets/ribbon/export-80.png"/>
+        <bt:Image id="Img.ExportMenu.16" DefaultValue="https://localhost:3443/assets/ribbon/export-menu-16.png"/>
+        <bt:Image id="Img.ExportMenu.32" DefaultValue="https://localhost:3443/assets/ribbon/export-menu-32.png"/>
+        <bt:Image id="Img.ExportMenu.80" DefaultValue="https://localhost:3443/assets/ribbon/export-menu-80.png"/>
+        <bt:Image id="Img.ExportOriginal.16" DefaultValue="https://localhost:3443/assets/ribbon/export-original-16.png"/>
+        <bt:Image id="Img.ExportOriginal.32" DefaultValue="https://localhost:3443/assets/ribbon/export-original-32.png"/>
+        <bt:Image id="Img.ExportOriginal.80" DefaultValue="https://localhost:3443/assets/ribbon/export-original-80.png"/>
+        <bt:Image id="Img.CopyOriginal.16" DefaultValue="https://localhost:3443/assets/ribbon/copy-original-16.png"/>
+        <bt:Image id="Img.CopyOriginal.32" DefaultValue="https://localhost:3443/assets/ribbon/copy-original-32.png"/>
+        <bt:Image id="Img.CopyOriginal.80" DefaultValue="https://localhost:3443/assets/ribbon/copy-original-80.png"/>
+        <bt:Image id="Img.CopySelection.16" DefaultValue="https://localhost:3443/assets/ribbon/copy-selection-16.png"/>
+        <bt:Image id="Img.CopySelection.32" DefaultValue="https://localhost:3443/assets/ribbon/copy-selection-32.png"/>
+        <bt:Image id="Img.CopySelection.80" DefaultValue="https://localhost:3443/assets/ribbon/copy-selection-80.png"/>
+        <bt:Image id="Img.LibrarySave.16" DefaultValue="https://localhost:3443/assets/ribbon/library-save-16.png"/>
+        <bt:Image id="Img.LibrarySave.32" DefaultValue="https://localhost:3443/assets/ribbon/library-save-32.png"/>
+        <bt:Image id="Img.LibrarySave.80" DefaultValue="https://localhost:3443/assets/ribbon/library-save-80.png"/>
+        <bt:Image id="Img.Open.16" DefaultValue="https://localhost:3443/assets/ribbon/open-16.png"/>
+        <bt:Image id="Img.Open.32" DefaultValue="https://localhost:3443/assets/ribbon/open-32.png"/>
+        <bt:Image id="Img.Open.80" DefaultValue="https://localhost:3443/assets/ribbon/open-80.png"/>
+        <bt:Image id="Img.Assistant.16" DefaultValue="https://localhost:3443/assets/ribbon/assistant-16.png"/>
+        <bt:Image id="Img.Assistant.32" DefaultValue="https://localhost:3443/assets/ribbon/assistant-32.png"/>
+        <bt:Image id="Img.Assistant.80" DefaultValue="https://localhost:3443/assets/ribbon/assistant-80.png"/>
+        <bt:Image id="Img.Settings.16" DefaultValue="https://localhost:3443/assets/ribbon/settings-16.png"/>
+        <bt:Image id="Img.Settings.32" DefaultValue="https://localhost:3443/assets/ribbon/settings-32.png"/>
+        <bt:Image id="Img.Settings.80" DefaultValue="https://localhost:3443/assets/ribbon/settings-80.png"/>
+      </bt:Images>
+      <bt:Urls><bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3443/taskpane.html?host=powerpoint"/></bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="Tab.Label" DefaultValue="SlideSCI"/>
+        <bt:String id="Grp.Arrange" DefaultValue="排列与尺寸"/>
+        <bt:String id="Grp.Images" DefaultValue="图片处理"/>
+        <bt:String id="Grp.Science" DefaultValue="科研标注"/>
+        <bt:String id="Grp.Content" DefaultValue="内容插入"/>
+        <bt:String id="Grp.Media" DefaultValue="素材与导出"/>
+        <bt:String id="Grp.Help" DefaultValue="助手与设置"/>
+        <bt:String id="Btn.Arrange.Label" DefaultValue="图片排列"/>
+        <bt:String id="Btn.Arrange.Tip" DefaultValue="图片排列"/>
+        <bt:String id="Btn.Insert.Label" DefaultValue="插入图片"/>
+        <bt:String id="Btn.Insert.Tip" DefaultValue="插入图片"/>
+        <bt:String id="Btn.Paste.Label" DefaultValue="粘贴图片"/>
+        <bt:String id="Btn.Paste.Tip" DefaultValue="粘贴图片"/>
+        <bt:String id="Btn.Pseudo.Label" DefaultValue="伪彩"/>
+        <bt:String id="Btn.Pseudo.Tip" DefaultValue="伪彩"/>
+        <bt:String id="Btn.Merge.Label" DefaultValue="合并通道"/>
+        <bt:String id="Btn.Merge.Tip" DefaultValue="合并通道"/>
+        <bt:String id="Btn.Reveal.Label" DefaultValue="打开原图"/>
+        <bt:String id="Btn.Reveal.Tip" DefaultValue="打开原图"/>
+        <bt:String id="Btn.Scale.Label" DefaultValue="比例尺"/>
+        <bt:String id="Btn.Scale.Tip" DefaultValue="比例尺"/>
+        <bt:String id="Btn.Zoom.Label" DefaultValue="放大图"/>
+        <bt:String id="Btn.Zoom.Tip" DefaultValue="制作放大图"/>
+        <bt:String id="Btn.Markdown.Label" DefaultValue="Markdown"/>
+        <bt:String id="Btn.Markdown.Tip" DefaultValue="插入 Markdown"/>
+        <bt:String id="Btn.Equation.Label" DefaultValue="公式"/>
+        <bt:String id="Btn.Equation.Tip" DefaultValue="插入公式"/>
+        <bt:String id="Btn.Library.Label" DefaultValue="素材库"/>
+        <bt:String id="Btn.Library.Tip" DefaultValue="素材库"/>
+        <bt:String id="Btn.LibrarySave.Label" DefaultValue="保存至素材库"/>
+        <bt:String id="Btn.LibrarySave.Tip" DefaultValue="保存至素材库"/>
+        <bt:String id="Btn.Export.Label" DefaultValue="导出"/>
+        <bt:String id="Btn.Export.Tip" DefaultValue="导出页面"/>
+        <bt:String id="Btn.Open.Label" DefaultValue="打开面板"/>
+        <bt:String id="Btn.Open.Tip" DefaultValue="打开 SlideSCI"/>
+        <bt:String id="Btn.Assistant.Label" DefaultValue="AI 助手"/>
+        <bt:String id="Btn.Assistant.Tip" DefaultValue="AI 助手"/>
+        <bt:String id="Btn.Settings.Label" DefaultValue="设置与帮助"/>
+        <bt:String id="Btn.Settings.Tip" DefaultValue="设置与帮助"/>
+        <bt:String id="Mnu.Align.Label" DefaultValue="对齐"/>
+        <bt:String id="Mnu.Align.Tip" DefaultValue="对齐"/>
+        <bt:String id="Mnu.Size.Label" DefaultValue="间距与尺寸"/>
+        <bt:String id="Mnu.Size.Tip" DefaultValue="间距与尺寸"/>
+        <bt:String id="Mnu.Position.Label" DefaultValue="位置"/>
+        <bt:String id="Mnu.Position.Tip" DefaultValue="位置"/>
+        <bt:String id="Mnu.Format.Label" DefaultValue="格式"/>
+        <bt:String id="Mnu.Format.Tip" DefaultValue="格式"/>
+        <bt:String id="Mnu.Titles.Label" DefaultValue="标题与标签"/>
+        <bt:String id="Mnu.Titles.Tip" DefaultValue="标题与标签"/>
+        <bt:String id="Mnu.Science.Label" DefaultValue="科学工具"/>
+        <bt:String id="Mnu.Science.Tip" DefaultValue="科学工具"/>
+        <bt:String id="Mnu.Content.Label" DefaultValue="更多内容"/>
+        <bt:String id="Mnu.Content.Tip" DefaultValue="更多内容"/>
+        <bt:String id="Mnu.Export.Label" DefaultValue="更多导出"/>
+        <bt:String id="Mnu.Export.Tip" DefaultValue="更多导出"/>
+        <bt:String id="It.Left" DefaultValue="左对齐"/>
+        <bt:String id="It.HCenter" DefaultValue="水平居中"/>
+        <bt:String id="It.Right" DefaultValue="右对齐"/>
+        <bt:String id="It.Top" DefaultValue="顶端对齐"/>
+        <bt:String id="It.VCenter" DefaultValue="垂直居中"/>
+        <bt:String id="It.Bottom" DefaultValue="底端对齐"/>
+        <bt:String id="It.SpaceH" DefaultValue="设置水平间距"/>
+        <bt:String id="It.SpaceV" DefaultValue="设置垂直间距"/>
+        <bt:String id="It.DistH" DefaultValue="水平均匀分布"/>
+        <bt:String id="It.DistV" DefaultValue="垂直均匀分布"/>
+        <bt:String id="It.CopySize" DefaultValue="复制宽高"/>
+        <bt:String id="It.PasteSize" DefaultValue="粘贴宽高"/>
+        <bt:String id="It.CopyW" DefaultValue="复制宽度"/>
+        <bt:String id="It.PasteW" DefaultValue="粘贴宽度"/>
+        <bt:String id="It.CopyH" DefaultValue="复制高度"/>
+        <bt:String id="It.PasteH" DefaultValue="粘贴高度"/>
+        <bt:String id="It.CopyPos" DefaultValue="复制位置"/>
+        <bt:String id="It.PastePos" DefaultValue="粘贴位置"/>
+        <bt:String id="It.SwapPos" DefaultValue="交换位置"/>
+        <bt:String id="It.CopyRel" DefaultValue="复制标注相对位置"/>
+        <bt:String id="It.PasteRel" DefaultValue="粘贴标注相对位置"/>
+        <bt:String id="It.CopyShape" DefaultValue="复制形状格式"/>
+        <bt:String id="It.PasteShape" DefaultValue="粘贴形状格式"/>
+        <bt:String id="It.CopyText" DefaultValue="复制文字格式"/>
+        <bt:String id="It.PasteText" DefaultValue="粘贴文字格式"/>
+        <bt:String id="It.CopyGroup" DefaultValue="复制组格式"/>
+        <bt:String id="It.PasteGroup" DefaultValue="粘贴组格式"/>
+        <bt:String id="It.CopyCrop" DefaultValue="复制裁剪"/>
+        <bt:String id="It.PasteCrop" DefaultValue="粘贴裁剪"/>
+        <bt:String id="It.TitleBelow" DefaultValue="添加下标题"/>
+        <bt:String id="It.TitleAbove" DefaultValue="添加上标题"/>
+        <bt:String id="It.Labels" DefaultValue="添加图片标签"/>
+        <bt:String id="It.UpdateLabels" DefaultValue="更新图片标签"/>
+        <bt:String id="It.SetFov" DefaultValue="设置原图 FOV"/>
+        <bt:String id="It.ReadFov" DefaultValue="重新读取 TIFF 标定"/>
+        <bt:String id="It.Code" DefaultValue="高亮代码"/>
+        <bt:String id="It.LatexSvg" DefaultValue="LaTeX SVG"/>
+        <bt:String id="It.Svg" DefaultValue="插入 SVG"/>
+        <bt:String id="It.RichText" DefaultValue="文本框转富文本"/>
+        <bt:String id="It.ExportOriginal" DefaultValue="导出原始图片"/>
+        <bt:String id="It.CopyOriginal" DefaultValue="复制原始图片"/>
+        <bt:String id="It.CopySelection" DefaultValue="复制选中对象"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="Btn.Arrange.Desc" DefaultValue="自动排列图片，设置列数、间距和统一宽高。"/>
+        <bt:String id="Btn.Insert.Desc" DefaultValue="选择图片并写入来源路径，随演示文稿保存。"/>
+        <bt:String id="Btn.Paste.Desc" DefaultValue="从剪贴板插入图片或视频文件。"/>
+        <bt:String id="Btn.Pseudo.Desc" DefaultValue="打开伪彩预览，逐张设置或应用到全部图片。"/>
+        <bt:String id="Btn.Merge.Desc" DefaultValue="合并 2–7 张伪彩通道图片，保留各通道原图。"/>
+        <bt:String id="Btn.Reveal.Desc" DefaultValue="在文件管理器中定位选中图片的原始文件。"/>
+        <bt:String id="Btn.Scale.Desc" DefaultValue="查看和编辑 FOV，实时预览比例尺效果。"/>
+        <bt:String id="Btn.Zoom.Desc" DefaultValue="框选原图区域生成放大图，支持多个区域和辅助线。"/>
+        <bt:String id="Btn.Markdown.Desc" DefaultValue="插入 Markdown 内容、表格与原生可编辑公式。"/>
+        <bt:String id="Btn.Equation.Desc" DefaultValue="插入可编辑的 PowerPoint 原生 LaTeX 公式。"/>
+        <bt:String id="Btn.Library.Desc" DefaultValue="浏览、搜索并插入素材，支持导入导出素材包。"/>
+        <bt:String id="Btn.LibrarySave.Desc" DefaultValue="将选中形状保存至素材库。"/>
+        <bt:String id="Btn.Export.Desc" DefaultValue="按范围、格式和 DPI 导出当前或全部页面。"/>
+        <bt:String id="Btn.Open.Desc" DefaultValue="显示 SlideSCI 侧边栏并恢复上次使用的分类。"/>
+        <bt:String id="Btn.Assistant.Desc" DefaultValue="打开 AI 助手对话与工具调用。"/>
+        <bt:String id="Btn.Settings.Desc" DefaultValue="查看版本、帮助与开发者信息。"/>
+        <bt:String id="Mnu.Align.Desc" DefaultValue="六种对象对齐方式；多选时以最先选中的对象为基准。"/>
+        <bt:String id="Mnu.Size.Desc" DefaultValue="设置间距、均匀分布，或复制粘贴宽高。"/>
+        <bt:String id="Mnu.Position.Desc" DefaultValue="复制、粘贴或交换位置，也可以复制标注相对位置。"/>
+        <bt:String id="Mnu.Format.Desc" DefaultValue="复制粘贴形状、文字、组和裁剪格式。"/>
+        <bt:String id="Mnu.Titles.Desc" DefaultValue="添加图片上下标题，或添加、更新子图标签。"/>
+        <bt:String id="Mnu.Science.Desc" DefaultValue="设置原图物理尺寸，或重新读取 TIFF 标定。"/>
+        <bt:String id="Mnu.Content.Desc" DefaultValue="插入高亮代码、SVG 或转换富文本。"/>
+        <bt:String id="Mnu.Export.Desc" DefaultValue="导出或复制原始图片，也可复制选中对象。"/>
+        <bt:String id="It.Left.Desc" DefaultValue="将所选对象的左边缘对齐到最先选中的对象。"/>
+        <bt:String id="It.HCenter.Desc" DefaultValue="将所选对象水平居中对齐。"/>
+        <bt:String id="It.Right.Desc" DefaultValue="将所选对象的右边缘对齐到最先选中的对象。"/>
+        <bt:String id="It.Top.Desc" DefaultValue="将所选对象的顶端对齐到最先选中的对象。"/>
+        <bt:String id="It.VCenter.Desc" DefaultValue="将所选对象垂直居中对齐。"/>
+        <bt:String id="It.Bottom.Desc" DefaultValue="将所选对象的底端对齐到最先选中的对象。"/>
+        <bt:String id="It.SpaceH.Desc" DefaultValue="设置所选对象之间的水平间距。"/>
+        <bt:String id="It.SpaceV.Desc" DefaultValue="设置所选对象之间的垂直间距。"/>
+        <bt:String id="It.DistH.Desc" DefaultValue="保留两端位置，水平均匀分布所选对象。"/>
+        <bt:String id="It.DistV.Desc" DefaultValue="保留两端位置，垂直均匀分布所选对象。"/>
+        <bt:String id="It.CopySize.Desc" DefaultValue="复制第一个所选对象的宽度和高度。"/>
+        <bt:String id="It.PasteSize.Desc" DefaultValue="把复制的宽高粘贴到所选对象。"/>
+        <bt:String id="It.CopyW.Desc" DefaultValue="复制第一个所选对象的宽度。"/>
+        <bt:String id="It.PasteW.Desc" DefaultValue="按原有宽高比把复制的宽度应用到所选对象。"/>
+        <bt:String id="It.CopyH.Desc" DefaultValue="复制第一个所选对象的高度。"/>
+        <bt:String id="It.PasteH.Desc" DefaultValue="按原有宽高比把复制的高度应用到所选对象。"/>
+        <bt:String id="It.CopyPos.Desc" DefaultValue="复制所选对象的位置。"/>
+        <bt:String id="It.PastePos.Desc" DefaultValue="按选择顺序把复制的位置粘贴到所选对象。"/>
+        <bt:String id="It.SwapPos.Desc" DefaultValue="交换两个所选对象的位置。"/>
+        <bt:String id="It.CopyRel.Desc" DefaultValue="复制参考图与各标注之间的相对位置。"/>
+        <bt:String id="It.PasteRel.Desc" DefaultValue="把标注相对位置粘贴到所选对象。"/>
+        <bt:String id="It.CopyShape.Desc" DefaultValue="复制选中形状的填充与轮廓格式。"/>
+        <bt:String id="It.PasteShape.Desc" DefaultValue="将复制的形状格式粘贴到所选对象。"/>
+        <bt:String id="It.CopyText.Desc" DefaultValue="复制字体、字号与文字效果。"/>
+        <bt:String id="It.PasteText.Desc" DefaultValue="将复制的文字格式粘贴到所选对象。"/>
+        <bt:String id="It.CopyGroup.Desc" DefaultValue="复制可编辑的组结构作为格式模板。"/>
+        <bt:String id="It.PasteGroup.Desc" DefaultValue="用复制的组格式替换所选对象并保留文字。"/>
+        <bt:String id="It.CopyCrop.Desc" DefaultValue="复制图片的裁剪区域与裁剪后高度。"/>
+        <bt:String id="It.PasteCrop.Desc" DefaultValue="把复制的裁剪应用到所选图片。"/>
+        <bt:String id="It.TitleBelow.Desc" DefaultValue="在每张图片下方添加标题文本框。"/>
+        <bt:String id="It.TitleAbove.Desc" DefaultValue="在每张图片上方添加标题文本框。"/>
+        <bt:String id="It.Labels.Desc" DefaultValue="按位置为所选图片添加子图标签。"/>
+        <bt:String id="It.UpdateLabels.Desc" DefaultValue="按位置更新所选标签的编号与格式。"/>
+        <bt:String id="It.SetFov.Desc" DefaultValue="设置原图物理宽度、高度与单位。"/>
+        <bt:String id="It.ReadFov.Desc" DefaultValue="重新读取 TIFF 文件中的物理标定。"/>
+        <bt:String id="It.Code.Desc" DefaultValue="插入带语法高亮的代码块。"/>
+        <bt:String id="It.LatexSvg.Desc" DefaultValue="插入由 LaTeX 转换的 SVG 公式。"/>
+        <bt:String id="It.Svg.Desc" DefaultValue="插入 SVG 矢量图。"/>
+        <bt:String id="It.RichText.Desc" DefaultValue="把文本框内容转换为富文本。"/>
+        <bt:String id="It.ExportOriginal.Desc" DefaultValue="导出演示文稿中的原始图片。"/>
+        <bt:String id="It.CopyOriginal.Desc" DefaultValue="把原始图片复制到剪贴板。"/>
+        <bt:String id="It.CopySelection.Desc" DefaultValue="把选中对象复制为图片。"/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>

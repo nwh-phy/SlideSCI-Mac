@@ -1,3 +1,9 @@
+# SlideSCI Mac development fork
+
+The macOS implementation is in `mac/`, with a shared task pane, a local Node.js service, a native macOS helper, and separate Office.js and WPS JS host adapters. See [macOS setup and verification scope](README.md) and [distribution instructions](mac/DISTRIBUTION.md). The original Windows instructions are preserved below.
+
+---
+
 <div align="center">
 
 English | [简体中文](README.md)

@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<customUI xmlns="http://schemas.microsoft.com/office/2006/01/customui">
+  <ribbon>
+    <tabs>
+      <tab id="SlideSciMacTab" label="SlideSCI">
+        <group id="SlideSciArrangeGroup" label="排列与尺寸">
+          <button id="SlideSciAlignImages" label="图片排列" size="large" getImage="SlideSciGetImage" onAction="SlideSciAlignImages" screentip="图片自动排列" supertip="列对齐、统一高度或统一宽度瀑布流，并可设置列数、间距、统一宽高。"/>
+          <menu id="SlideSciAlignMenu" label="对齐" screentip="六种对齐方式" supertip="多选时以最先选中的对象为基准；单选时对齐幻灯片。" getImage="SlideSciGetImage">
+            <button id="SlideSciAlignLeft" label="左对齐" onAction="SlideSciAlignLeft" getImage="SlideSciGetImage"/>
+            <button id="SlideSciAlignHorizontalCenter" label="水平居中" onAction="SlideSciAlignHorizontalCenter" getImage="SlideSciGetImage"/>
+            <button id="SlideSciAlignRight" label="右对齐" onAction="SlideSciAlignRight" getImage="SlideSciGetImage"/>
+            <button id="SlideSciAlignTop" label="顶端对齐" onAction="SlideSciAlignTop" getImage="SlideSciGetImage"/>
+            <button id="SlideSciAlignVerticalCenter" label="垂直居中" onAction="SlideSciAlignVerticalCenter" getImage="SlideSciGetImage"/>
+            <button id="SlideSciAlignBottom" label="底端对齐" onAction="SlideSciAlignBottom" getImage="SlideSciGetImage"/>
+          </menu>
+          <menu id="SlideSciSizeMenu" label="间距与尺寸" screentip="间距、分布与宽高" supertip="设置对象间距、均匀分布，或复制粘贴宽高。" getImage="SlideSciGetImage">
+            <button id="SlideSciSpacingHorizontal" label="设置水平间距" onAction="SlideSciSpacingHorizontal" getImage="SlideSciGetImage"/>
+            <button id="SlideSciSpacingVertical" label="设置垂直间距" onAction="SlideSciSpacingVertical" getImage="SlideSciGetImage"/>
+            <button id="SlideSciDistributeHorizontal" label="水平均匀分布" onAction="SlideSciDistributeHorizontal" getImage="SlideSciGetImage"/>
+            <button id="SlideSciDistributeVertical" label="垂直均匀分布" onAction="SlideSciDistributeVertical" getImage="SlideSciGetImage"/>
+            <button id="SlideSciCopyDimensions" label="复制宽高" onAction="SlideSciCopyDimensions" getImage="SlideSciGetImage"/>
+            <button id="SlideSciPasteDimensions" label="粘贴宽高" onAction="SlideSciPasteDimensions" getImage="SlideSciGetImage"/>
+            <button id="SlideSciCopyWidth" label="复制宽度" onAction="SlideSciCopyWidth" getImage="SlideSciGetImage"/>
+            <button id="SlideSciPasteWidth" label="粘贴宽度" onAction="SlideSciPasteWidth" getImage="SlideSciGetImage"/>
+            <button id="SlideSciCopyHeight" label="复制高度" onAction="SlideSciCopyHeight" getImage="SlideSciGetImage"/>
+            <button id="SlideSciPasteHeight" label="粘贴高度" onAction="SlideSciPasteHeight" getImage="SlideSciGetImage"/>
+          </menu>
+          <menu id="SlideSciPositionMenu" label="位置" screentip="位置与相对位置" supertip="复制、粘贴或交换对象位置，也可复制标注相对位置。" getImage="SlideSciGetImage">
+            <button id="SlideSciCopyPosition" label="复制位置" onAction="SlideSciCopyPosition" getImage="SlideSciGetImage"/>
+            <button id="SlideSciPastePosition" label="粘贴位置" onAction="SlideSciPastePosition" getImage="SlideSciGetImage"/>
+            <button id="SlideSciSwapPosition" label="交换位置" onAction="SlideSciSwapPosition" getImage="SlideSciGetImage"/>
+            <button id="SlideSciCopyRelativePosition" label="复制标注相对位置" onAction="SlideSciCopyRelativePosition" getImage="SlideSciGetImage"/>
+            <button id="SlideSciPasteRelativePosition" label="粘贴标注相对位置" onAction="SlideSciPasteRelativePosition" getImage="SlideSciGetImage"/>
+          </menu>
+          <menu id="SlideSciFormatMenu" label="格式" screentip="格式复制粘贴" supertip="形状、文字、组和裁剪格式的复制与粘贴。" getImage="SlideSciGetImage">
+            <button id="SlideSciCopyShapeFormat" label="复制形状格式" onAction="SlideSciCopyShapeFormat" getImage="SlideSciGetImage"/>
+            <button id="SlideSciPasteShapeFormat" label="粘贴形状格式" onAction="SlideSciPasteShapeFormat" getImage="SlideSciGetImage"/>
+            <button id="SlideSciCopyTextFormat" label="复制文字格式" onAction="SlideSciCopyTextFormat" getImage="SlideSciGetImage"/>
+            <button id="SlideSciPasteTextFormat" label="粘贴文字格式" onAction="SlideSciPasteTextFormat" getImage="SlideSciGetImage"/>
+            <button id="SlideSciCopyGroupFormat" label="复制组格式" onAction="SlideSciCopyGroupFormat" getImage="SlideSciGetImage"/>
+            <button id="SlideSciPasteGroupFormat" label="粘贴组格式" onAction="SlideSciPasteGroupFormat" getImage="SlideSciGetImage"/>
+            <button id="SlideSciCopyCrop" label="复制裁剪" onAction="SlideSciCopyCrop" getImage="SlideSciGetImage"/>
+            <button id="SlideSciPasteCrop" label="粘贴裁剪" onAction="SlideSciPasteCrop" getImage="SlideSciGetImage"/>
+          </menu>
+          <menu id="SlideSciTitlesMenu" label="标题与标签" screentip="图片标题与子图标签" supertip="添加图片上下标题，或添加、更新子图标签。" getImage="SlideSciGetImage">
+            <button id="SlideSciTitlesBelow" label="添加下标题" onAction="SlideSciTitlesBelow" getImage="SlideSciGetImage"/>
+            <button id="SlideSciTitlesAbove" label="添加上标题" onAction="SlideSciTitlesAbove" getImage="SlideSciGetImage"/>
+            <button id="SlideSciAddLabelsButton" label="添加图片标签" onAction="SlideSciLabels" getImage="SlideSciGetImage"/>
+            <button id="SlideSciUpdateLabelsButton" label="更新图片标签" onAction="SlideSciUpdateLabels" getImage="SlideSciGetImage"/>
+          </menu>
+        </group>
+        <group id="SlideSciImagesGroup" label="图片处理">
+          <button id="SlideSciInsertImages" label="插入图片" size="large" getImage="SlideSciGetImage" onAction="SlideSciInsertImages" screentip="插入图片并记录来源" supertip="一次选择多张图片，文件路径写入替代文字并随演示文稿保存。"/>
+          <button id="SlideSciPseudoColorButton" label="伪彩" size="large" getImage="SlideSciGetImage" onAction="SlideSciPseudoColor" screentip="设置伪彩" supertip="打开伪彩预览，支持逐张设置或应用到全部图片。"/>
+          <button id="SlideSciMergeChannelsButton" label="合并通道" onAction="SlideSciMergeChannels" screentip="合并 2–7 张伪彩通道图片" supertip="保留各通道原图，在右侧生成合并图。" getImage="SlideSciGetImage"/>
+          <button id="SlideSciRevealSource" label="打开原图" onAction="SlideSciRevealSource" screentip="在文件管理器中定位原图" getImage="SlideSciGetImage"/>
+          <button id="SlideSciPasteImages" label="粘贴图片" onAction="SlideSciPasteImages" screentip="粘贴图片或视频文件" supertip="从剪贴板读取图片或视频文件并插入当前幻灯片。" getImage="SlideSciGetImage"/>
+        </group>
+        <group id="SlideSciScienceGroup" label="科研标注">
+          <button id="SlideSciScaleBarButton" label="比例尺" size="large" getImage="SlideSciGetImage" onAction="SlideSciScaleBar" screentip="添加或编辑比例尺" supertip="查看和编辑 FOV，实时预览比例尺效果。"/>
+          <button id="SlideSciZoomButton" label="放大图" size="large" onAction="SlideSciZoomImages" screentip="创建或编辑放大区域" supertip="框选原图区域生成放大图，支持多个区域和辅助线。" getImage="SlideSciGetImage"/>
+          <menu id="SlideSciScienceMenu" label="科学工具" screentip="FOV 与 TIFF 标定" supertip="设置原图物理尺寸，或重新读取 TIFF 标定。" getImage="SlideSciGetImage">
+            <button id="SlideSciSetFovButton" label="设置原图 FOV" onAction="SlideSciSetFov" getImage="SlideSciGetImage"/>
+            <button id="SlideSciReadFovButton" label="重新读取 TIFF 标定" onAction="SlideSciReadFov" getImage="SlideSciGetImage"/>
+          </menu>
+        </group>
+        <group id="SlideSciContentGroup" label="内容插入">
+          <button id="SlideSciMarkdownButton" label="Markdown" size="large" onAction="SlideSciMarkdown" screentip="插入 Markdown" supertip="支持表格、代码、行内公式和原生可编辑公式。" getImage="SlideSciGetImage"/>
+          <button id="SlideSciEquationButton" label="公式" size="large" onAction="SlideSciLatex" screentip="插入可编辑 LaTeX 公式" supertip="转换为 PowerPoint 原生可编辑公式。" getImage="SlideSciGetImage"/>
+          <menu id="SlideSciContentMenu" label="更多内容" screentip="代码、SVG 与富文本" supertip="插入高亮代码、SVG 或把文本框转换为富文本。" getImage="SlideSciGetImage">
+            <button id="SlideSciCodeButton" label="高亮代码" onAction="SlideSciCode" getImage="SlideSciGetImage"/>
+            <button id="SlideSciLatexSvgButton" label="LaTeX SVG" onAction="SlideSciLatexSvg" getImage="SlideSciGetImage"/>
+            <button id="SlideSciSvgButton" label="插入 SVG" onAction="SlideSciSvg" getImage="SlideSciGetImage"/>
+            <button id="SlideSciRichTextButton" label="文本框转富文本" onAction="SlideSciRichText" getImage="SlideSciGetImage"/>
+          </menu>
+        </group>
+        <group id="SlideSciMediaGroup" label="素材与导出">
+          <button id="SlideSciLibraryButton" label="素材库" size="large" onAction="SlideSciOpenLibrary" screentip="浏览与插入素材" supertip="搜索、插入、更新素材，或导入导出完整素材库。" getImage="SlideSciGetImage"/>
+          <button id="SlideSciExportSlidesButton" label="导出" size="large" onAction="SlideSciExportSlides" screentip="导出页面" supertip="按范围、格式和 DPI 导出当前页面或全部页面。" getImage="SlideSciGetImage"/>
+          <menu id="SlideSciExportMenu" label="更多导出" screentip="原始图片与选中对象" supertip="导出或复制原始图片，也可把选中对象复制为图片。" getImage="SlideSciGetImage">
+            <button id="SlideSciExportOriginalButton" label="导出原始图片" onAction="SlideSciExportOriginal" getImage="SlideSciGetImage"/>
+            <button id="SlideSciCopyOriginalButton" label="复制原始图片" onAction="SlideSciCopyOriginal" getImage="SlideSciGetImage"/>
+            <button id="SlideSciCopySelectionButton" label="复制选中对象" onAction="SlideSciCopySelection" getImage="SlideSciGetImage"/>
+          </menu>
+          <button id="SlideSciLibrarySaveButton" label="保存至素材库" onAction="SlideSciLibrarySave" screentip="将选中形状保存为素材" getImage="SlideSciGetImage"/>
+        </group>
+        <group id="SlideSciHelpGroup" label="助手与设置">
+          <button id="SlideSciOpenButton" label="打开面板" size="large" onAction="SlideSciOpen" screentip="打开 SlideSCI 侧边栏" getImage="SlideSciGetImage"/>
+          <button id="SlideSciAIShortcut" label="AI 助手" onAction="SlideSciOpenAI" screentip="打开 AI 助手对话" getImage="SlideSciGetImage"/>
+          <button id="SlideSciSettingsButton" label="设置与帮助" onAction="SlideSciAbout" screentip="版本、帮助与开发者信息" getImage="SlideSciGetImage"/>
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>

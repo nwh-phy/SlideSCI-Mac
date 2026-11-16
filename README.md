@@ -1,3 +1,79 @@
+# SlideSCI Mac 开发分支
+
+本 fork 适配 macOS 上的 Microsoft PowerPoint 和 WPS 演示。原版 Windows C# / VSTO 源码保留在 `SlideSCI/`；Mac 实现在 `mac/`，由共享任务窗格、本机 Node.js 服务、Office.js / WPS JS API 和 macOS 原生辅助程序组成。
+
+顶部 SlideSCI 功能区按排列与尺寸、图片处理、科研标注、内容插入、素材与导出、助手与设置分组。常用功能直接点击，相关操作通过菜单选择；需要参数的功能直接打开对应设置，无参数的快捷操作直接执行。
+
+任务窗格保留排版与编辑、图片、科学图片、内容与公式、素材库、AI 助手、导出、设置与帮助八个分类。每个分类通过“功能”选择器切换具体工具，一次只显示当前工具，切换时保留已填写内容；分类按钮在窄面板中换行显示，分类与功能选择始终可见，仅当前工具的参数区域滚动：
+
+- 排列、对齐、间距、位置与尺寸复制、裁剪、文字与形状格式、组合格式、图文同比缩放和文字对象选择。
+- 图片和视频来源记录、定位原图、标题与标签、16 位 TIFF 显示、伪彩及通道合并。
+- 物理 FOV、可编辑比例尺、多个放大区域与联动更新。
+- Markdown、代码高亮、SVG、LaTeX SVG 和原生可编辑公式。
+- 可编辑素材、文件夹、搜索、更新，以及素材包导入导出。
+- AI 多配置、聊天历史、读取演示文稿和执行原生编辑命令。API 密钥保存在 macOS 钥匙串中。
+- 页面 PNG / JPEG / BMP / PDF、选区图片 / PDF、原图导出与复制，以及设置和帮助入口。
+
+多选对齐以宿主返回的第一项为基准，不能假定其顺序就是点击顺序。复制状态在当前任务窗格会话中保留。两款宿主的核心行为已完成实机验收，下方列出验证范围与外部服务限制。
+
+开发版的对齐、间距、位置和尺寸操作使用轻量几何读写；选择计数、页面尺寸与导出范围使用元数据摘要。批量图片共享原图读取，滑块合并尚未执行的中间输入；逐页 PDF 一次导出后拆页。富格式、原生内容插入和图片替换仍保留完整文稿处理，组内对象在坐标系不明确时使用完整路径以保持结果。后台先轻量检查几何与文字变化，定期补充富格式检查。
+
+安装 ZIP 的构建、启动、证书信任、卸载与限制见 [Mac 安装与发行说明](mac/DISTRIBUTION.md)。安装包内置 Node.js 和原生辅助程序，面向 Apple Silicon；发布版本见本 fork 的 Releases。
+
+## 启动开发服务
+
+需要 Node.js 22 或更新版本、Python 3，以及 Xcode Command Line Tools（首次编译 Swift 原生辅助程序）。首次启动前安装项目依赖：
+
+```sh
+cd mac
+npm ci
+npm start
+```
+
+HTTP 服务仅监听 `127.0.0.1:3000`，供 WPS 开发任务窗格使用。普通浏览器中可预览界面，但没有宿主接口，操作按钮会禁用。
+
+PowerPoint 使用 `https://localhost:3443`，需要本机信任、包含 `localhost` 的 TLS 证书：
+
+```sh
+cd mac
+npm start -- --cert /absolute/path/to/localhost.crt --key /absolute/path/to/localhost.key
+```
+
+证书和私钥应放在仓库根目录已忽略的 `.signing/` 下。安装脚本不会修改 macOS 钥匙串，也不会自动信任证书。
+
+## 注册本机开发加载项
+
+在仓库根目录执行；先安装并打开对应宿主，以创建其容器目录：
+
+```sh
+python3 mac/scripts/install.py wps
+python3 mac/scripts/install.py powerpoint
+```
+
+脚本在覆盖现有的 SlideSCI 文件或 WPS `publish.xml` 前创建带时间戳的相邻备份，保留其他加载项的注册。它不会修改 WPS 安装包、安全开关或其他插件。回滚时先关闭对应宿主，只移除 `slidesci-mac-dev` 的注册及专属目录、PowerPoint 的 `wef/SlideSCI-Mac.xml`；已有文件可按脚本输出的位置恢复备份。
+
+- WPS：先启动开发服务，注册脚本使用官方 `wpsjs` 对应的在线开发模式，入口为 `http://127.0.0.1:3000/wps/`。首次加载时确认信任 `slidesci-mac-dev`，从顶部 SlideSCI 直接选择功能。WPS 会缓存加载项脚本；更新代码后保存工作并重新打开 WPS。
+- PowerPoint：在加载项菜单选择 `SlideSCI Mac`；完整实现需要 `PowerPointApi 1.10`，低版本会明确提示升级。顶部 SlideSCI 的功能按钮和菜单直接定位到对应工具；更新功能区清单后重新运行注册脚本，并在保存工作后重新打开 PowerPoint 以刷新缓存。开发 HTTPS 证书须由使用者在本机确认信任。
+
+## 当前验证范围
+
+- 自动化检查覆盖排列与尺寸、16 位 TIFF 和物理标定、伪彩与通道、Markdown 与 Office Math、素材包、AI 工具协议，以及 PPTX 关系图裁剪、组合图片替换和富文本格式保留。运行方式见下方。
+- WPS Mac 12.1.29166 与 PowerPoint Mac 16.115 均已加载完整新版任务窗格，并在独立测试副本中读取真实文稿、对象和坐标。
+- WPS 与 PowerPoint 独立副本的局部格式、20% 物理比例尺、放大图及两条辅助线在保存重开后保留；原生公式经重开后实际编辑并保存，Office Math 结构保留。PowerPoint 19 项核心实机检查全部通过，并修复重复粘贴造成的位置偏移。
+- 原生富文本检查覆盖目标超链接、UTF-16 选区、动态字段、原生公式、渐变和精确阴影 / 倒影数据；图片包检查覆盖组合、裁剪、SVG 原图和兼容预览，以及被排除页面和孤立资源的移除。
+- AI 供应商真实请求需要在插件内配置可用的 API 地址、模型和密钥。当前本机四个预设均未配置密钥，尚未验证真实供应商调用。
+
+```sh
+cd mac
+npm test
+```
+
+参考：[PowerPoint API 版本要求](https://learn.microsoft.com/en-us/javascript/api/requirement-sets/powerpoint/powerpoint-api-requirement-sets)、[Mac 开发加载项注册](https://learn.microsoft.com/en-us/office/dev/add-ins/testing/sideload-an-office-add-in-on-mac)、[WPS 加载项开发说明](https://open.wps.cn/documents/app-integration-dev/wps365/client/wpsoffice/wps-integration-mode/wps-addin-development/wps-addin-development-instructions)。
+
+以下为上游 Windows 插件说明，不能据此认定对应功能已在 Mac 可用。
+
+---
+
 <div align="center">
 
 [English](README.en.md) | 简体中文

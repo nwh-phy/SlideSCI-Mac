@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SlideSCI</title>
+  <link rel="stylesheet" href="taskpane.css">
+  <script type="module" src="src/taskpane.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#workspace">跳到功能内容</a>
+  <header class="app-header">
+    <div class="brand">
+      <h1>SlideSCI <span>Mac</span></h1>
+      <p id="host-label">科研排图</p>
+    </div>
+    <button id="refresh-selection" class="quiet" type="button" disabled>刷新选择</button>
+  </header>
+
+  <div id="connection" class="connection" role="status" aria-live="polite">
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="connection-text">正在连接演示软件…</span>
+    <button id="retry-connection" class="quiet" type="button" hidden>重试连接</button>
+  </div>
+  <p id="selection-summary" class="selection-summary" role="status" aria-live="polite"></p>
+
+  <div id="progress-region" class="progress-region" hidden>
+    <div id="progress-bar" class="progress-track" role="progressbar" aria-label="操作进度" aria-valuemin="0" aria-valuemax="100" aria-valuetext="正在处理">
+      <div class="progress-fill"></div>
+    </div>
+    <div class="progress-row">
+      <span id="progress-text">正在处理…</span>
+      <button id="cancel-action" class="danger" type="button">取消</button>
+    </div>
+  </div>
+
+  <div id="notifications" class="notifications" aria-live="polite" aria-atomic="false"></div>
+
+  <nav class="tab-bar" aria-label="功能分类">
+    <div id="tabs" role="tablist" aria-label="SlideSCI 功能"></div>
+  </nav>
+
+  <main id="workspace" tabindex="-1" aria-busy="false">
+    <div id="panels"></div>
+    <section id="startup-error" class="empty-state" hidden>
+      <h2>无法连接演示软件</h2>
+      <p id="startup-error-text" role="alert"></p>
+      <button id="retry-startup" type="button">重新连接</button>
+    </section>
+    <noscript><p class="empty-state">SlideSCI 需要启用 JavaScript 才能使用。</p></noscript>
+  </main>
+
+  <datalist id="slidesci-fonts"></datalist>
+
+  <footer class="app-footer">
+    <p>SlideSCI Mac · 科研排图</p>
+    <p id="version-label" hidden></p>
+  </footer>
+</body>
+</html>

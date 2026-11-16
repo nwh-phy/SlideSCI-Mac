@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<JsPlugin>
+  <ApiVersion>1.0.0</ApiVersion>
+  <Name>slidesci-mac-dev</Name>
+  <Description>SlideSCI Mac 科研排图开发版</Description>
+</JsPlugin>
