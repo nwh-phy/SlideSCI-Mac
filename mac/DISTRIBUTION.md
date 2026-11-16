@@ -46,4 +46,4 @@ Mac 版问题请在 [SlideSCI-Mac Issues](https://github.com/nwh-phy/SlideSCI-Ma
 
 同目录 `.zip.sha256` 用于核对下载文件。仅执行 `shasum -a 256 -c 文件名.zip.sha256` 不会安装软件。
 
-开发者构建：在有 Node.js、npm 与 Xcode Command Line Tools 的 Apple Silicon Mac 上安装 `mac/` 的锁定依赖后，执行 `node mac/scripts/distribution.mjs build`。构建器校验官方 Node 归档，安装锁定生产依赖，编译原生程序并生成 ZIP 与 SHA-256。
+开发者构建：在有 Node.js、npm 与 Xcode Command Line Tools 的 Apple Silicon Mac 上安装 `mac/` 的锁定依赖后，执行 `node mac/scripts/distribution.mjs build`。构建器校验官方 Node 归档，安装锁定生产依赖，编译原生程序并生成 ZIP 与 SHA-256。随后执行 `node mac/scripts/verify-package.mjs 安装包.zip --report INSTALL-VERIFICATION.json`，在隔离目录中检查包内容、内置运行时、原生程序、公式转换、安装注册、过期服务记录、证书换新和卸载恢复；3000/3443 端口空闲时还会检查服务启动与停止。
