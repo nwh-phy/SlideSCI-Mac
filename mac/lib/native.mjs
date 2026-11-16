@@ -140,6 +140,10 @@ async function appleScript(body, { json = false } = {}) {
     const result = await processCall('/usr/bin/osascript', ['-'], script, { timeout: 190000 });
     return json ? JSON.parse(result) : result;
   } catch (error) {
+    const text = String(error.message || '');
+    // -1743: the user has not allowed (or refused) automation; -1712: an unanswered permission prompt or a modal dialog.
+    if (/-1743|not authori[sz]ed to send Apple events|不允许发送 Apple 事件/i.test(text)) error.message = 'macOS 尚未允许 SlideSCI 服务控制 PowerPoint。请在“系统设置 → 隐私与安全性 → 自动化”中，为运行 SlideSCI 的终端打开 Microsoft PowerPoint，然后重试。';
+    else if (/-1712|AppleEvent.*(timed out|已超时)/i.test(text)) error.message = 'PowerPoint 没有及时响应。如果屏幕上有“终端想要控制 Microsoft PowerPoint”的提示，请选择允许后重试；也请确认 PowerPoint 没有打开中的对话框。';
     if (process.env.SLIDESCI_NATIVE_DEBUG) error.message += `\n--- AppleScript ---\n${body}`;
     throw error;
   }

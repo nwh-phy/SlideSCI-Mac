@@ -932,7 +932,8 @@ async function connect() {
   setConnection('connecting', state.services.version ? '正在连接演示软件…' : '正在启动本地服务…');
   try {
     if (!state.target) throw new Error('请从 PowerPoint 或 WPS 演示的 SlideSCI 选项卡打开此面板。');
-    await state.services.ready();
+    const session = await state.services.ready();
+    for (const warning of session?.warnings || []) notify(warning, 'error');
     setConnection('connecting', '正在连接演示软件…');
     state.hostUnsubscribe?.();
     state.hostUnsubscribe = null;

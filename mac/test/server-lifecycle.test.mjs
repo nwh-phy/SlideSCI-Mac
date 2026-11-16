@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, utimes, access } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, utimes, access, chmod } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
@@ -59,6 +59,10 @@ test('service lifecycle: loopback listeners, hello, removed grant route, cache s
     await mkdir(cache, { recursive: true });
     const stale = path.join(cache, 'old-export.pdf'), video = path.join(cache, 'old-clip.mp4'), fresh = path.join(cache, 'fresh.png');
     for (const file of [stale, video, fresh]) await writeFile(file, 'x');
+    // A host cache the service may not write (macOS refused access to that app's data).
+    const wpsCache = path.join(home, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/tmp/SlideSCI-Mac');
+    await mkdir(wpsCache, { recursive: true });
+    await chmod(wpsCache, 0o500);
     const twoDaysAgo = new Date(Date.now() - 2 * 86400000);
     for (const file of [stale, video]) await utimes(file, twoDaysAgo, twoDaysAgo);
 
@@ -80,6 +84,8 @@ test('service lifecycle: loopback listeners, hello, removed grant route, cache s
       const base = `http://127.0.0.1:${httpPort}`;
       const session = JSON.parse((await request(base + '/api/session')).text);
       assert.match(session.instance, /^[0-9a-f-]{36}$/);
+      assert.equal(session.warnings.length, 1, 'a refused host cache is reported to the pane at connect');
+      assert.match(session.warnings[0], /拒绝 SlideSCI 服务访问 WPS 的数据/);
       for (const address of ['127.0.0.1', '[::1]']) {
         const secure = JSON.parse((await request(`https://${address}:${httpsPort}/api/session`, { ca })).text);
         assert.equal(secure.token, session.token, `HTTPS on ${address} serves the same session`);
@@ -105,6 +111,7 @@ test('service lifecycle: loopback listeners, hello, removed grant route, cache s
       if (child.exitCode === null) child.kill('SIGKILL');
     }
   } finally {
+    await chmod(path.join(home, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/tmp/SlideSCI-Mac'), 0o700).catch(() => {});
     await rm(home, { recursive: true, force: true });
   }
 });

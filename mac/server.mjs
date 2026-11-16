@@ -3,7 +3,7 @@ import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { lookup } from 'node:dns/promises';
-import { lstat, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -33,6 +33,22 @@ events.setMaxListeners(100);
 const env = { events, pptx, version };
 env.native = Object.fromEntries(Object.entries(nativeHandlers).map(([name, fn]) => [name, input => fn(input || {}, env)]));
 Object.assign(env, await createFileServices(env));
+// macOS asks before one app's process touches another app's data. Probing at start makes the
+// prompt appear while the user is at Start.command, and a refusal reaches the pane at once
+// instead of failing an insert or export minutes later.
+const accessWarnings = [];
+for (const [host, directory] of Object.entries(env.hostDirs || {})) {
+  const container = path.dirname(path.dirname(directory));
+  if (!await stat(container).then(item => item.isDirectory(), () => false)) continue;
+  const probe = path.join(directory, `.slidesci-access-${process.pid}`);
+  try { await mkdir(directory, { recursive: true, mode: 0o700 }); await writeFile(probe, ''); await rm(probe, { force: true }); }
+  catch (error) {
+    if (!['EPERM', 'EACCES'].includes(error.code)) continue;
+    const name = host === 'wps' ? 'WPS' : 'PowerPoint';
+    accessWarnings.push(`macOS 拒绝 SlideSCI 服务访问 ${name} 的数据，插入图片、公式、格式与导出等功能会失败。出现“访问其他 App 的数据”提示时请选择允许；如果之前拒绝过，请在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”中打开运行 SlideSCI 的终端，然后重新运行 Start.command。`);
+  }
+}
+for (const warning of accessWarnings) console.error(warning);
 const diagnostics = [];
 function diagnose(message) {
   diagnostics.push({ at: new Date().toISOString(), message: String(message || '服务错误').slice(0, 4000) });
@@ -196,7 +212,7 @@ async function serve(request, response) {
     }
     const url = new URL(request.url, 'http://localhost');
     if (url.pathname === '/api/session' && request.method === 'GET') {
-      json(response, 200, { token, version, instance, acceptance: process.env.SLIDESCI_ACCEPTANCE === '1' }); return;
+      json(response, 200, { token, version, instance, warnings: accessWarnings, acceptance: process.env.SLIDESCI_ACCEPTANCE === '1' }); return;
     }
     if (url.pathname === '/api/events' && request.method === 'GET') {
       if (!sameToken(url.searchParams.get('token'))) { json(response, 403, { error: '会话授权已失效，请重新加载插件。' }); return; }

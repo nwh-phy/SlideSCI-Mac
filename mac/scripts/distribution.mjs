@@ -81,6 +81,26 @@ async function stop() {
   }
   throw new Error('服务尚未退出；保留记录，不强制结束。');
 }
+// The service writes into each host's own cache; macOS asks before Terminal touches another app's
+// data. Probing here makes that prompt appear in this window and names a refusal plainly.
+const accessHelp = names => `macOS 拒绝“终端”访问 ${names.join('、')} 的数据，SlideSCI 的插入、格式与导出等功能将无法使用。出现“访问其他 App 的数据”提示时请选择允许；如果之前拒绝过，请在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”中打开“终端”，然后重新运行此命令。`;
+async function deniedHosts() {
+  const denied = [];
+  for (const [name, id] of [['PowerPoint', 'com.microsoft.Powerpoint'], ['WPS', 'com.kingsoft.wpsoffice.mac']]) {
+    const container = path.join(profile, 'Library/Containers', id, 'Data');
+    if (!await exists(container)) continue;
+    const directory = path.join(container, 'tmp/SlideSCI-Mac'), probe = path.join(directory, `.slidesci-access-${process.pid}`);
+    try { await fs.mkdir(directory, { recursive: true, mode: 0o700 }); await fs.writeFile(probe, ''); await fs.rm(probe, { force: true }); }
+    catch (error) { if (['EPERM', 'EACCES'].includes(error.code)) denied.push(name); }
+  }
+  return denied;
+}
+function permissionMessage(error) {
+  if (!['EPERM', 'EACCES'].includes(error?.code)) return error?.message;
+  const where = String(error.path || error.message);
+  const names = /com\.microsoft\.Powerpoint/i.test(where) ? ['PowerPoint'] : /kingsoft/i.test(where) ? ['WPS'] : null;
+  return names ? accessHelp(names) : error.message;
+}
 async function reserve(port, host) {
   const server = net.createServer(socket => socket.destroy());
   await new Promise((resolve, reject) => server.once('error', reject).listen(port, host, resolve));
@@ -114,6 +134,8 @@ async function start() {
     console.log('可运行安装目录中的 RenewCertificate.command 提前生成新证书。');
   }
   const trusted = await trustCertificate();
+  const denied = await deniedHosts();
+  if (denied.length) console.log('警告：' + accessHelp(denied));
   const certificate = await fs.readFile(path.join(state, 'tls/localhost.crt'));
   const reservations = [];
   try {
@@ -429,4 +451,4 @@ try {
   else if (action === 'uninstall') await uninstall();
   else if (action === 'renew-certificate') await renewCertificate();
   else throw new Error('使用：distribution.mjs build|install|start|stop|uninstall|renew-certificate [--profile 隔离测试目录] [--output 构建目录] [--trust-certificate yes|no]');
-} catch (error) { console.error(error.message); process.exitCode = 1; }
+} catch (error) { console.error(permissionMessage(error)); process.exitCode = 1; }

@@ -80,6 +80,19 @@ test('installer trusts its localhost certificate only with consent, swaps trust 
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
+test('Start names a host whose data macOS refuses to Terminal before it starts the service', async () => {
+  const { home, runInstaller } = await fixture();
+  const cache = path.join(home, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/tmp/SlideSCI-Mac');
+  try {
+    runInstaller('renew-certificate', ['--trust-certificate', 'no']);
+    await mkdir(cache, { recursive: true });
+    await chmod(cache, 0o500);
+    let output = '';
+    try { output = runInstaller('start', ['--trust-certificate', 'no']); } catch (error) { output = String(error.stdout) + String(error.stderr); }
+    assert.match(output, /警告：macOS 拒绝“终端”访问 WPS 的数据/);
+  } finally { await chmod(cache, 0o700).catch(() => {}); await rm(home, { recursive: true, force: true }); }
+});
+
 test('an isolated profile never asks to change the signed-in user\'s trust settings', async () => {
   const { home, calls } = await fixture();
   try {
