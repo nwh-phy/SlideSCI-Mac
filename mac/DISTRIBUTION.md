@@ -1,4 +1,4 @@
-# SlideSCI Mac 安装与发行说明
+# SlideSCI Mac 0.1.1 安装与发行说明
 
 此 ZIP 面向 Apple Silicon Mac，内置 Node.js 24.22.3、生产依赖及 Swift 原生辅助程序。使用者无需安装 Node.js、Python 或 Xcode。原生程序按 macOS 14 最低版本构建；较早系统及 Intel Mac 安装包未验证。实际验证环境为 macOS 27.2、WPS 12.1.29166、PowerPoint 16.115。PowerPoint 需要 PowerPointApi 1.10（Mac 16.105 起）及 SharedRuntime 1.1；Office.js 首次加载需要访问微软 CDN。
 
@@ -30,13 +30,13 @@ WPS 已在独立文稿中验证局部文字格式、物理比例尺、局部放�
 
 PowerPoint 在不含旧开发加载项引用的新建文稿中完成 19 项核心实机检查，全部通过。覆盖局部文字格式、图片来源与伪彩、物理比例尺、放大图、Markdown 与原生公式、原图提取、PNG/JPEG/BMP/PDF 导出及可编辑素材保存和复用。保存重开后颜色、22 磅字号、20% 比例尺、放大图和两条辅助线记录保留；原生公式重开后经 PowerPoint 公式编辑器改写并保存，仍保留两处 Office Math。修复了 PowerPoint 粘贴重复对象时导致的 12 磅位置偏移。
 
-安装器在隔离目录模拟已初始化的宿主容器，11 项安装、启动、实际内容转换和卸载检查全部通过。全新 macOS 账户的 Gatekeeper、权限和证书信任提示未验证；安装包没有 Apple 公证。
+隔离安装验证覆盖宿主注册与备份、生产依赖、原生辅助程序、实际内容转换、端口冲突、PID 归属、停止服务及卸载恢复。当前发行的检查结果见同一 Release 中的 `INSTALL-VERIFICATION.json`。全新 macOS 账户的 Gatekeeper、权限和证书信任提示未验证；安装包没有 Apple 公证。
 
 不将浏览器预览、HTTP 200 或构建成功视为宿主功能通过。字体缺失可能影响显示；源图片路径在另一台机器上未必存在；多选顺序取决于宿主返回顺序。外部 AI 请求需要用户配置且可能发送所选文稿内容。
 
 ## 来源与校验
 
-`BUILD-INFO.json` 记录版本、内置 Node 版本及归档 SHA-256、构建时间、Git 基线和源码快照指纹。该 Git 基线不代表快照中的未提交改动已公开提交。`SOURCE-MANIFEST.json` 对随包源码逐文件记录 SHA-256；`mac/` 和 `SlideSCI/latex-converter/` 包含本发行运行所需的源码及公式资源。`LICENSE` 为 AGPL-3.0；Node 和生产依赖保留各自许可证。
+`BUILD-INFO.json` 记录版本、内置 Node 版本及归档 SHA-256、构建时间、Git 基线和源码快照指纹。该 Git 基线不代表快照中的未提交改动已公开提交。`SOURCE-MANIFEST.json` 对随包源码逐文件记录 SHA-256；`mac/` 和 `SlideSCI/latex-converter/` 包含本发行运行所需的源码及公式资源。`LICENSE` 为 AGPL-3.0；Node、生产依赖及 Phosphor 图标保留各自许可证。
 
 同目录 `.zip.sha256` 用于核对下载文件。仅执行 `shasum -a 256 -c 文件名.zip.sha256` 不会安装软件。
 
