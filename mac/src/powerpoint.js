@@ -8,6 +8,18 @@ const geometryShapeLoad = 'items/id,items/name,items/left,items/top,items/width,
 const shapeTypes = { Group: 'group', Image: 'picture', Media: 'media', Table: 'table', TextBox: 'text' };
 const textTypes = new Set(['TextBox', 'Placeholder', 'GeometricShape', 'Callout', 'Freeform']);
 // Office returns a path or URL; a file name such as "增长 20%.pptx" is not valid URI encoding.
+// Office.js reports GeneralException while PowerPoint is briefly busy, for example right after an
+// AppleScript paste. Reads are safe to repeat; writes are never retried.
+export async function readPowerPoint(operation, attempts = 3) {
+  for (let attempt = 1; ; attempt++) {
+    try { return await PowerPoint.run(operation); }
+    catch (error) {
+      const busy = error?.code === 'GeneralException' || error?.message === 'GeneralException';
+      if (!busy || attempt >= attempts) throw error;
+      await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+    }
+  }
+}
 function documentName(url) {
   const last = String(url || '').split('/').at(-1) || '';
   try { return decodeURIComponent(last); } catch { return last; }
@@ -65,7 +77,7 @@ export async function connectPowerPoint(services) {
     return { indices, slideIndex };
   }
   async function quick(options = {}) {
-    return PowerPoint.run(async context => {
+    return readPowerPoint(async context => {
       const presentation = context.presentation;
       const slides = presentation.slides;
       const selected = presentation.getSelectedSlides();
@@ -142,7 +154,7 @@ export async function connectPowerPoint(services) {
     return walk(shapes, false);
   }
   async function geometryContext(options = {}, extraIds = []) {
-    return PowerPoint.run(async context => {
+    return readPowerPoint(async context => {
       const presentation = context.presentation;
       const slides = presentation.slides;
       const selectedSlides = presentation.getSelectedSlides();
@@ -231,7 +243,7 @@ export async function connectPowerPoint(services) {
   async function snapshot(options = {}) {
     const selection = await quick();
     const all = options.scope === 'presentation';
-    const data = await PowerPoint.run(async context => {
+    const data = await readPowerPoint(async context => {
       const slides = context.presentation.slides;
       const exported = slides.exportAsBase64Presentation(all ? selection.slides.map(slide => slide.id) : [selection.slideId]);
       await context.sync();
@@ -501,7 +513,7 @@ export async function connectPowerPoint(services) {
   // Cheap watch fingerprint: live IDs, geometry, type, name, z-order and text only.
   // Rich formats (fill/line/crop/image bytes) still come from the periodic pptx snapshot.
   async function surfaceFingerprint() {
-    return PowerPoint.run(async context => {
+    return readPowerPoint(async context => {
       const presentation = context.presentation;
       const slides = presentation.slides;
       const selectedSlides = presentation.getSelectedSlides();

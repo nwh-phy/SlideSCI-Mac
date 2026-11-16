@@ -73,7 +73,12 @@ const mimeTypes = {
   '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm',
   '.avi': 'video/x-msvideo', '.wmv': 'video/x-ms-wmv', '.mpg': 'video/mpeg', '.mpeg': 'video/mpeg',
 };
-function decode(data) { if (typeof data !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) throw new Error('Invalid base64 file data.'); return Buffer.from(data, 'base64'); }
+// Linear checks only: a repeated-group regex over a multi-megabyte string overflows V8's regex
+// stack (a 300 dpi slide export or a large picture is several megabytes of base64).
+function decode(data) {
+  if (typeof data !== 'string' || data.length % 4 || /[^A-Za-z0-9+/=]/.test(data) || /=[^=]|={3}/.test(data)) throw new Error('Invalid base64 file data.');
+  return Buffer.from(data, 'base64');
+}
 // APFS limits a name to 255 UTF-8 bytes; cached copies carry a 37-byte UUID prefix.
 function shortName(name, limit = 180) {
   if (Buffer.byteLength(name) <= limit) return name;

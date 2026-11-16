@@ -73,3 +73,17 @@ test('powerpoint deep watch pass reads the slide without native text-cursor call
   assert.deepEqual(reported, []);
   assert.deepEqual(nativeActions, ['documentInfo'], 'only the one-time document lookup reaches AppleScript');
 });
+
+test('PowerPoint reads retry a transient GeneralException but give up on other errors', async t => {
+  const original = globalThis.PowerPoint;
+  t.after(() => { if (original === undefined) delete globalThis.PowerPoint; else globalThis.PowerPoint = original; });
+  const { readPowerPoint } = await import('../src/powerpoint.js');
+  let calls = 0;
+  globalThis.PowerPoint = { run: async operation => { calls++; if (calls < 3) throw Object.assign(new Error('GeneralException'), { code: 'GeneralException' }); return operation(); } };
+  assert.equal(await readPowerPoint(() => 'read'), 'read');
+  assert.equal(calls, 3);
+  calls = 0;
+  globalThis.PowerPoint = { run: async () => { calls++; throw Object.assign(new Error('InvalidArgument'), { code: 'InvalidArgument' }); } };
+  await assert.rejects(readPowerPoint(() => 'never'), /InvalidArgument/);
+  assert.equal(calls, 1, 'a real error is not retried');
+});
