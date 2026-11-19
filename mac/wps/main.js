@@ -67,7 +67,6 @@
     SlideSciCopySelectionButton: 'copy_kd',
     SlideSciLibrarySaveButton: 'save_kd',
     SlideSciOpenButton: 'SelectionPane',
-    SlideSciAIShortcut: 'bubble_add_kd',
     SlideSciSettingsButton: 'setup_kd',
   };
 
@@ -170,7 +169,17 @@
     };
   }
 
-  function startBackground() {
+  function autoPasteTrackingEnabled() {
+    try {
+      var saved = JSON.parse(window.localStorage.getItem('slidesci:settings:v1') || '{}');
+      return saved && saved['background.autoPasteTracking'] === true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function startBackground(force) {
+    if (!force && !autoPasteTrackingEnabled()) return Promise.resolve(null);
     if (backgroundPromise) return backgroundPromise;
     backgroundPromise = Promise.all([
       import(new URL('/src/services.js', window.location.href).href),
@@ -183,7 +192,8 @@
       return startBackgroundTracking({
         host: 'wps',
         services: services,
-        role: 'wps-hidden'
+        role: 'wps-hidden',
+        science: false
       });
     }).catch(function (error) {
       backgroundPromise = null;
@@ -202,7 +212,6 @@
   window.SlideSciOpenScience = openAt('科学图片');
   window.SlideSciOpenContent = openAt('内容与公式');
   window.SlideSciOpenLibrary = openAt('素材库', { panel: 'library.browser' });
-  window.SlideSciOpenAI = openAt('AI 助手', { panel: 'ai.chat' });
   window.SlideSciOpenExport = openAt('导出');
   window.SlideSciOpenHelp = openAt('设置与帮助');
 

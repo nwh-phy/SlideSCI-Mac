@@ -120,7 +120,6 @@ const ICONS = {
   'library-save': { glyph: 'books', color: 'media', badge: 'plus' },
 
   'open': { glyph: 'sidebar-simple', color: 'neutral' },
-  'assistant': { glyph: 'sparkle', color: 'ai' },
   'settings': { glyph: 'gear-six', color: 'neutral' },
 };
 

@@ -84,23 +84,22 @@ test('service lifecycle: loopback listeners, hello, removed grant route, cache s
       const base = `http://127.0.0.1:${httpPort}`;
       const session = JSON.parse((await request(base + '/api/session')).text);
       assert.match(session.instance, /^[0-9a-f-]{36}$/);
-      assert.equal(session.warnings.length, 1, 'a refused host cache is reported to the pane at connect');
-      assert.match(session.warnings[0], /拒绝 SlideSCI 服务访问 WPS 的数据/);
+      assert.deepEqual(session.warnings, [], 'passive startup never probes host containers or raises permission prompts');
       for (const address of ['127.0.0.1', '[::1]']) {
         const secure = JSON.parse((await request(`https://${address}:${httpsPort}/api/session`, { ca })).text);
         assert.equal(secure.token, session.token, `HTTPS on ${address} serves the same session`);
       }
       const grant = await request(base + '/api/files/grant', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-SlideSCI-Token': session.token }, body: JSON.stringify({ paths: ['/etc/hosts'] }) });
       assert.equal(grant.status, 404, 'arbitrary path grants are no longer exposed');
+      const aiRoute = await request(base + '/api/ai/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-SlideSCI-Token': session.token }, body: '{}' });
+      assert.equal(aiRoute.status, 404, 'AI assistant endpoints are removed');
       const foreign = await request(base + '/api/session', { headers: { Host: 'example.com' } });
       assert.equal(foreign.status, 403);
       const hello = await firstEvent(`${base}/api/events?token=${session.token}&host=powerpoint&client=pane-test-0001`);
       assert.deepEqual(hello, { type: 'hello', data: { instance: session.instance, leases: [] } });
-      const sweepDeadline = Date.now() + 5000;
-      while (await exists(stale) && Date.now() < sweepDeadline) await new Promise(resolve => setTimeout(resolve, 50));
-      assert.equal(await exists(stale), false, 'day-old intermediate files are swept');
-      assert.equal(await exists(video), true, 'media that a host may link to is kept');
-      assert.equal(await exists(fresh), true, 'recent files are kept');
+      assert.equal(await exists(stale), true, 'startup does not touch PowerPoint container files before an advanced action');
+      assert.equal(await exists(video), true);
+      assert.equal(await exists(fresh), true);
       const workDirs = (await readdir(os.tmpdir())).filter(name => name.startsWith(`slidesci-mac-${child.pid}-`));
       assert.equal(workDirs.length, 1);
       child.kill('SIGTERM');

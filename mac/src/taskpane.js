@@ -6,11 +6,10 @@ import * as imagesFeature from './features/images.js';
 import * as scienceFeature from './features/science.js';
 import * as contentFeature from './features/content.js';
 import * as libraryFeature from './features/library.js';
-import * as aiFeature from './features/ai.js';
 import * as exportFeature from './features/export.js';
 import { startBackgroundTracking } from './background.js';
 
-const SECTION_ORDER = ['排版与编辑', '图片', '科学图片', '内容与公式', '素材库', 'AI 助手', '导出', '设置与帮助'];
+const SECTION_ORDER = ['排版与编辑', '图片', '科学图片', '内容与公式', '素材库', '导出', '设置与帮助'];
 const PANE_REQUEST_KEY = 'slidesci.pane.request';
 const EVENT_NAME = 'slidesci:activate';
 const PARAMETERS = new URLSearchParams(location.search);
@@ -19,16 +18,15 @@ const TAB_PARAMETER = PARAMETERS.get('tab');
 const ACTION_PARAMETER = PARAMETERS.get('action');
 const PANEL_PARAMETER = PARAMETERS.get('panel');
 const EXECUTE_PARAMETER = PARAMETERS.get('execute') === 'true';
-const MODULES = [editingFeature, imagesFeature, scienceFeature, contentFeature, libraryFeature, aiFeature, exportFeature];
+const MODULES = [editingFeature, imagesFeature, scienceFeature, contentFeature, libraryFeature, exportFeature];
 const DEFAULT_FEATURES = {
   '排版与编辑': 'action:editing.grid',
   '图片': 'action:images.insert',
   '科学图片': 'panel:science.scale',
   '内容与公式': 'action:content.markdown',
   '素材库': 'panel:library.browser',
-  'AI 助手': 'panel:ai.chat',
   '导出': 'action:export.slides',
-  '设置与帮助': 'action:export.version'
+  '设置与帮助': 'panel:export.preferences'
 };
 
 const dom = {
@@ -929,12 +927,9 @@ async function connect() {
   state.connected = false;
   setBusy(false);
   clearStartupError();
-  setConnection('connecting', state.services.version ? '正在连接演示软件…' : '正在启动本地服务…');
+  setConnection('connecting', '正在连接演示软件…');
   try {
     if (!state.target) throw new Error('请从 PowerPoint 或 WPS 演示的 SlideSCI 选项卡打开此面板。');
-    const session = await state.services.ready();
-    for (const warning of session?.warnings || []) notify(warning, 'error');
-    setConnection('connecting', '正在连接演示软件…');
     state.hostUnsubscribe?.();
     state.hostUnsubscribe = null;
     await state.background?.stop();
@@ -958,19 +953,13 @@ async function connect() {
     if (typeof host.onChanged === 'function') {
       state.hostUnsubscribe = host.onChanged(() => {
         scheduleSummary(350);
-        if (!state.scienceReady) initializeScience();
       });
     }
     mountSelectedPanel();
     setBusy(false);
     flushPendingRun();
     scheduleSummary(0);
-    queueMicrotask(() => initializeScience().then(startTracking));
-    loadVersion();
-    if ((await state.services.session()).acceptance) {
-      const { startAcceptance } = await import('./acceptance.js');
-      startAcceptance(makeContext(state.services, {}));
-    }
+    probeLocalService(host);
   } catch (error) {
     state.connected = false;
     state.host = null;
@@ -983,31 +972,32 @@ async function connect() {
   }
 }
 
-async function initializeScience() {
-  if (state.scienceReady) return;
-  if (state.target !== 'powerpoint') {
-    state.scienceReady = true;
-    return;
-  }
-  state.scienceReady = true;
+async function probeLocalService(host) {
   try {
-    const cleanup = await scienceFeature.initialize(makeContext(state.services, {}));
-    state.scienceCleanup = typeof cleanup === 'function' ? cleanup : null;
-  } catch (error) {
-    state.scienceReady = false;
-    notify('科学图片自动同步初始化失败：' + error.message, 'warning');
-    await state.services.reportError(error, { operation: 'science-initialize' });
+    const session = await state.services.ready();
+    if (host !== state.host) return;
+    for (const warning of session?.warnings || []) notify(warning, 'error');
+    if (state.services.settings.get('background.autoPasteTracking', false) === true) startTracking();
+    loadVersion();
+    if (session?.acceptance) {
+      const { startAcceptance } = await import('./acceptance.js');
+      startAcceptance(makeContext(state.services, {}));
+    }
+  } catch {
+    if (host !== state.host) return;
+    setConnection('ready', `已连接 ${host.name}（仅基础组图）`);
   }
 }
 
 function startTracking() {
-  if (state.target !== 'powerpoint') return;
+  if (!state.connected || !state.host) return;
   if (state.background && !state.background.stopped) return;
   startBackgroundTracking({
     host: state.target,
     services: state.services,
     hostAdapter: state.host,
     role: 'foreground',
+    science: false,
     onStatus: event => {
       if (!event?.message) return;
       if (event.kind === 'success') notify(event.message, 'success');
@@ -1018,6 +1008,12 @@ function startTracking() {
   }).catch(error => {
     notify('自动粘贴监听未启动：' + error.message, 'warning');
   });
+}
+
+async function stopTracking() {
+  const current = state.background;
+  state.background = null;
+  if (current) await current.stop();
 }
 
 async function loadVersion() {
@@ -1171,6 +1167,10 @@ function wireShell() {
     dom.cancelAction.disabled = true;
     updateProgress('正在取消…当前原生操作结束后生效。');
     state.activeRun.controller.abort();
+  });
+  globalThis.addEventListener?.('slidesci:tracking-toggle', event => {
+    if (event?.detail?.enabled) startTracking();
+    else stopTracking().catch(error => notify('停止自动粘贴监听失败：' + error.message, 'warning'));
   });
   globalThis.addEventListener?.('pagehide', () => {
     cleanupPanels();

@@ -4,6 +4,10 @@ import { ensureOfficeReady } from './ribbon.js';
 const flatten = shapes => shapes.flatMap(shape => [shape, ...flatten(shape.children || [])]);
 const directProperties = new Set(['left', 'top', 'width', 'height', 'rotation', 'name', 'tags', 'alternativeText']);
 const geometryProperties = new Set(['left', 'top', 'width', 'height', 'rotation']);
+const simpleFontKeys = new Set(['name', 'nameFarEast', 'nameAscii', 'size', 'bold', 'italic', 'color', 'underline', 'strikethrough', 'subscript', 'superscript', 'allCaps']);
+const simpleTextFrameKeys = new Set(['wordWrap', 'autoSize', 'marginLeft', 'marginRight', 'marginTop', 'marginBottom']);
+const autoSizeValues = { none: 'AutoSizeNone', shapeToFitText: 'AutoSizeShapeToFitText', textToFitShape: 'AutoSizeTextToFitShape' };
+const paragraphAlignValues = { left: 'Left', center: 'Center', right: 'Right', justify: 'Justify' };
 const geometryShapeLoad = 'items/id,items/name,items/left,items/top,items/width,items/height,items/rotation,items/type';
 const shapeTypes = { Group: 'group', Image: 'picture', Media: 'media', Table: 'table', TextBox: 'text' };
 const textTypes = new Set(['TextBox', 'Placeholder', 'GeometricShape', 'Callout', 'Freeform']);
@@ -31,15 +35,18 @@ export async function connectPowerPoint(services) {
   if (!Office.context.requirements.isSetSupported('PowerPointApi', '1.10')) {
     throw new Error('此版本 PowerPoint 缺少完整文档与图片接口，请更新 Microsoft 365 PowerPoint 后重试（需要 PowerPointApi 1.10）。');
   }
-  if (!services?.request) throw new Error('缺少 SlideSCI 本地服务连接。');
-  const request = (route, input) => services.request(route, input);
-  const native = (action, input = {}) => request('native/execute', { host: 'powerpoint', action, ...input,
-    ...(boundTitle && action !== 'rasterizeImage' ? { presentationName: Office.context.document.url ? documentName(Office.context.document.url) : boundTitle } : {}) });
-  let queue = Promise.resolve(), timer, stopped = false, fingerprint, surface, deepPolls = 0, notifying = false, pending = 0;
-  const listeners = new Set();
+  const request = (route, input) => {
+    if (!services?.request) throw new Error('此高级功能需要 SlideSCI 本机服务，请确认服务正在运行后重试。');
+    return services.request(route, input);
+  };
   let boundTitle = '';
-  const documentInfo = await native('documentInfo');
-  boundTitle = documentInfo.name || '';
+  const native = (action, input = {}) => {
+    const presentationName = Office.context.document.url ? documentName(Office.context.document.url) : boundTitle;
+    return request('native/execute', { host: 'powerpoint', action, ...input,
+      ...(presentationName && action !== 'rasterizeImage' ? { presentationName } : {}) });
+  };
+  let queue = Promise.resolve(), timer, stopped = false, surface, notifying = false, pending = 0;
+  const listeners = new Set();
   function serial(operation) {
     pending++;
     const run = async () => { try { return await operation(); } finally { pending--; } };
@@ -172,10 +179,166 @@ export async function connectPowerPoint(services) {
       let shapes = [];
       if (options.scope === 'slide') shapes = await readSlideTree(context, slideIndex);
       else if (wanted.size) shapes = selectSubtrees(await readSlideTree(context, slideIndex), wanted);
+      if (options.textMeta) {
+        const placeholders = flatten(shapes).filter(shape => shape.nativeType === 'Placeholder');
+        for (const shape of placeholders) {
+          try {
+            const frame = officeShape(context, shape).textFrame;
+            frame.load('hasText');
+            await context.sync();
+            shape.isPlaceholder = true;
+            if (frame.hasText !== undefined) shape.hasTextFrame = true;
+          } catch { /* picture/chart/table placeholder has no text frame */ }
+        }
+      }
       return { presentationId: presentation.id, title: title(), slideId: slides.items[slideIndex].id, slideIndex,
         width: presentation.pageSetup.slideWidth, height: presentation.pageSetup.slideHeight, geometry: true,
         selectionIds, selectedSlideIndices: indices, shapes };
     });
+  }
+  function isSimpleFont(font) {
+    if (!font || typeof font !== 'object' || Array.isArray(font)) return false;
+    return Object.keys(font).every(key => simpleFontKeys.has(key));
+  }
+  function isSimpleTextFrame(frame) {
+    if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return false;
+    if (!Object.keys(frame).every(key => simpleTextFrameKeys.has(key))) return false;
+    return frame.autoSize === undefined || Boolean(autoSizeValues[frame.autoSize]);
+  }
+  function isSimpleParagraphs(paragraphs, text) {
+    if (!Array.isArray(paragraphs) || paragraphs.length !== 1) return false;
+    const [first] = paragraphs;
+    if (!first || typeof first !== 'object') return false;
+    for (const key of Object.keys(first)) {
+      if (!['runs', 'alignment'].includes(key)) return false;
+    }
+    if (first.alignment !== undefined && !paragraphAlignValues[first.alignment]) return false;
+    if (first.runs !== undefined) {
+      if (!Array.isArray(first.runs) || first.runs.some(run => run.font !== undefined)) return false;
+      if (first.runs.map(run => String(run.text ?? '')).join('') !== String(text ?? '')) return false;
+    }
+    return true;
+  }
+  function isSimpleInsertText(command) {
+    if (command.op !== 'insertText' || command.slideIndex !== undefined) return false;
+    if (command.fill !== undefined || command.line !== undefined || command.runs !== undefined) return false;
+    if (command.font !== undefined && !isSimpleFont(command.font)) return false;
+    if (command.textFrame !== undefined && !isSimpleTextFrame(command.textFrame)) return false;
+    if (command.paragraphs !== undefined && !isSimpleParagraphs(command.paragraphs, command.text)) return false;
+    return true;
+  }
+  function isSimpleTextUpdate(command) {
+    if (command.op !== 'update' || command.slideIndex !== undefined || !command.properties) return false;
+    const keys = Object.keys(command.properties);
+    if (!keys.length) return false;
+    let hasText = false;
+    for (const key of keys) {
+      if (directProperties.has(key)) continue;
+      if (key === 'text') { hasText = true; continue; }
+      if (key === 'font' && isSimpleFont(command.properties.font)) { hasText = true; continue; }
+      return false;
+    }
+    return hasText;
+  }
+  function isSimpleOfficeBatch(commands) {
+    return commands.every(command => command.slideIndex === undefined && (
+      geometryUpdate(command) || isSimpleTextUpdate(command) || isSimpleInsertText(command)
+      || command.op === 'select' || command.op === 'group' || command.op === 'delete'
+    ));
+  }
+  function applySimpleFont(target, font) {
+    if (!font) return;
+    const name = font.name ?? font.nameFarEast ?? font.nameAscii;
+    if (name !== undefined) target.name = String(name);
+    if (font.size !== undefined) target.size = Number(font.size);
+    if (font.bold !== undefined) target.bold = Boolean(font.bold);
+    if (font.italic !== undefined) target.italic = Boolean(font.italic);
+    if (font.color !== undefined) target.color = String(font.color);
+    if (font.underline !== undefined) target.underline = font.underline ? 'Single' : 'None';
+    if (font.strikethrough !== undefined) target.strikethrough = Boolean(font.strikethrough);
+    if (font.subscript !== undefined) target.subscript = Boolean(font.subscript);
+    if (font.superscript !== undefined) target.superscript = Boolean(font.superscript);
+    if (font.allCaps !== undefined) target.allCaps = Boolean(font.allCaps);
+  }
+  async function applySimpleOffice(commands, readback = true) {
+    const applied = await PowerPoint.run(async context => {
+      const slides = context.presentation.slides;
+      const selectedSlides = context.presentation.getSelectedSlides();
+      slides.load('items/id');
+      selectedSlides.load('items/id');
+      await context.sync();
+      if (!slides.items.length) throw new Error('请先在当前演示文稿中添加幻灯片。');
+      const indices = selectedSlides.items.map(slide => slides.items.findIndex(item => item.id === slide.id));
+      if (indices.length > 1) return false;
+      const slideIndex = indices[0] ?? 0;
+      const slide = slides.getItemAt(slideIndex);
+      const needsLookup = commands.some(command => command.op === 'update' || command.op === 'delete');
+      const tree = needsLookup ? await readSlideTree(context, slideIndex) : [];
+      const byId = new Map(flatten(tree).map(shape => [String(shape.id), shape]));
+      for (const command of commands) {
+        if (command.op === 'insertText') {
+          const created = slide.shapes.addTextBox(String(command.text ?? ''), {
+            left: Number(command.left ?? 0), top: Number(command.top ?? 0),
+            width: Number(command.width ?? 100), height: Number(command.height ?? 24)
+          });
+          if (command.name !== undefined) created.name = String(command.name);
+          if (command.rotation !== undefined) created.rotation = Number(command.rotation);
+          metadata(created, command);
+          const frame = created.textFrame;
+          if (command.textFrame) {
+            if (command.textFrame.wordWrap !== undefined) frame.wordWrap = Boolean(command.textFrame.wordWrap);
+            if (command.textFrame.autoSize && autoSizeValues[command.textFrame.autoSize]) frame.autoSizeSetting = autoSizeValues[command.textFrame.autoSize];
+            if (command.textFrame.marginLeft !== undefined) frame.leftMargin = Number(command.textFrame.marginLeft);
+            if (command.textFrame.marginRight !== undefined) frame.rightMargin = Number(command.textFrame.marginRight);
+            if (command.textFrame.marginTop !== undefined) frame.topMargin = Number(command.textFrame.marginTop);
+            if (command.textFrame.marginBottom !== undefined) frame.bottomMargin = Number(command.textFrame.marginBottom);
+          }
+          const range = frame.textRange;
+          applySimpleFont(range.font, command.font);
+          const alignment = command.paragraphs?.[0]?.alignment;
+          if (alignment && paragraphAlignValues[alignment]) range.paragraphFormat.horizontalAlignment = paragraphAlignValues[alignment];
+        } else if (command.op === 'update') {
+          const found = byId.get(String(command.id));
+          if (!found) return false;
+          const shape = officeShape(context, found);
+          const values = command.properties || {};
+          for (const key of ['left', 'top', 'width', 'height', 'rotation', 'name']) {
+            if (values[key] !== undefined) shape[key] = values[key];
+          }
+          metadata(shape, values);
+          if (values.text !== undefined) shape.textFrame.textRange.text = String(values.text);
+          if (values.font) applySimpleFont(shape.textFrame.textRange.font, values.font);
+        } else if (command.op === 'group') {
+          const ids = (command.ids || []).map(String);
+          slide.setSelectedShapes(ids);
+          await context.sync();
+          const grouped = context.presentation.getSelectedShapes().group();
+          if (command.name !== undefined) grouped.name = String(command.name);
+          metadata(grouped, command);
+        } else if (command.op === 'delete') {
+          const ids = new Set((command.ids || (command.id !== undefined ? [command.id] : [])).map(String));
+          const insideSelected = shape => {
+            for (let parent = shape.parentId; parent; parent = byId.get(String(parent))?.parentId) if (ids.has(String(parent))) return true;
+            return false;
+          };
+          for (const id of ids) {
+            const found = byId.get(id);
+            if (!found) return false;
+            if (!insideSelected(found)) officeShape(context, found).delete();
+          }
+        } else if (command.op === 'select') {
+          const ids = (command.ids || (command.id !== undefined ? [command.id] : [])).map(String);
+          slide.setSelectedShapes(ids);
+        }
+      }
+      await context.sync();
+      return true;
+    });
+    if (!applied) return null;
+    if (!readback) { emit(); return { applied: commands.length }; }
+    const model = await geometryContext({ scope: 'slide' });
+    emit();
+    return model;
   }
   function geometryUpdate(command) {
     if (command.op !== 'update' || !command.properties) return false;
@@ -275,7 +438,6 @@ export async function connectPowerPoint(services) {
       const byId = new Map(images.map(image => [image.id, image]));
       for (const shape of flatten(model.shapes)) if (byId.has(shape.packageId || shape.id)) shape.image = { ...shape.image, ...byId.get(shape.packageId || shape.id) };
     }
-    if (!all && !options.watch) fingerprint = contentFingerprint(model);
     return { context: model, pptx: data, packageSlideIndex };
   }
   function find(model, id, slideIndex = model.slideIndex) {
@@ -504,14 +666,11 @@ export async function connectPowerPoint(services) {
       const change = { kind: emittedKind };
       emittedKind = null;
       for (const callback of listeners) {
-        try { callback(change); } catch (error) { services.reportError(error, { operation: 'powerpoint-change' }); }
+        try { callback(change); } catch (error) { services?.reportError?.(error, { operation: 'powerpoint-change' }); }
       }
     });
   }
-  // Selection and text cursor are watched by the cheap pass; the deep pass compares content only.
-  function contentFingerprint(model) { return JSON.stringify({ ...model, selectionIds: undefined, textSelection: undefined }); }
   // Cheap watch fingerprint: live IDs, geometry, type, name, z-order and text only.
-  // Rich formats (fill/line/crop/image bytes) still come from the periodic pptx snapshot.
   async function surfaceFingerprint() {
     return readPowerPoint(async context => {
       const presentation = context.presentation;
@@ -550,25 +709,16 @@ export async function connectPowerPoint(services) {
         selection: selection.items.map(shape => String(shape.id)).join(',') };
     });
   }
-  // Rich formats (fill, crop, image bytes, alt text) need a slide export; check them once every
-  // few unchanged cheap passes, as the WPS watch does.
-  const DEEP_POLL_INTERVAL = 4;
+  // Lightweight Office.js watch only: never export full PPTX packages on a background timer.
   async function poll() {
     if (stopped || !listeners.size) return;
     if (pending) { timer = setTimeout(poll, 1500); return; }
     try {
       const cheap = await serial(surfaceFingerprint);
       if (surface === undefined) surface = cheap;
-      else if (cheap.content !== surface.content) { surface = cheap; deepPolls = 0; emit('content'); }
+      else if (cheap.content !== surface.content) { surface = cheap; emit('content'); }
       else if (cheap.selection !== surface.selection) { surface = cheap; emit('selection'); }
-      else if (++deepPolls >= DEEP_POLL_INTERVAL) {
-        deepPolls = 0;
-        const next = await serial(() => snapshot({ scope: 'slide', watch: true }));
-        const current = contentFingerprint(next.context);
-        if (fingerprint !== undefined && current !== fingerprint) emit('content');
-        fingerprint = current;
-      }
-    } catch (error) { await services.reportError(error, { operation: 'powerpoint-watch' }); }
+    } catch (error) { await services?.reportError?.(error, { operation: 'powerpoint-watch' }); }
     if (!stopped && listeners.size) timer = setTimeout(poll, 1500);
   }
   const host = {
@@ -621,6 +771,10 @@ export async function connectPowerPoint(services) {
       const lightweight = !rich && (options.geometry === true || !moved);
       if (lightweight) {
         const model = await applyGeometry(commands, movedIds, options.readback !== false);
+        if (model) return model;
+      }
+      if (isSimpleOfficeBatch(commands)) {
+        const model = await applySimpleOffice(commands, options.readback !== false);
         if (model) return model;
       }
       return apply(commands);

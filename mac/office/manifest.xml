@@ -3,11 +3,11 @@
  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="TaskPaneApp">
   <Id>4f358224-91a0-4cd8-9cd0-4a65ee58b8a3</Id>
-  <Version>1.1.2.0</Version>
+  <Version>1.2.0.0</Version>
   <ProviderName>SlideSCI Mac</ProviderName>
   <DefaultLocale>zh-CN</DefaultLocale>
   <DisplayName DefaultValue="SlideSCI Mac"/>
-  <Description DefaultValue="SlideSCI 科研排图、图片标注、内容插入、素材库与 AI 助手"/>
+  <Description DefaultValue="SlideSCI 科研排图、图片标注、内容插入与素材库"/>
   <IconUrl DefaultValue="https://localhost:3443/assets/icon32.png"/>
   <HighResolutionIconUrl DefaultValue="https://localhost:3443/assets/icon64.png"/>
   <SupportUrl DefaultValue="https://github.com/nwh-phy/SlideSCI-Mac/issues"/>
@@ -432,18 +432,12 @@
               </Group>
               <Group id="SlideSCI.HelpGroup">
                 <Label resid="Grp.Help"/>
-                <Icon><bt:Image size="16" resid="Img.Assistant.16"/><bt:Image size="32" resid="Img.Assistant.32"/><bt:Image size="80" resid="Img.Assistant.80"/></Icon>
+                <Icon><bt:Image size="16" resid="Img.Settings.16"/><bt:Image size="32" resid="Img.Settings.32"/><bt:Image size="80" resid="Img.Settings.80"/></Icon>
                 <Control xsi:type="Button" id="SlideSCI.Open">
                   <Label resid="Btn.Open.Label"/>
                   <Supertip><Title resid="Btn.Open.Tip"/><Description resid="Btn.Open.Desc"/></Supertip>
                   <Icon><bt:Image size="16" resid="Img.Open.16"/><bt:Image size="32" resid="Img.Open.32"/><bt:Image size="80" resid="Img.Open.80"/></Icon>
                   <Action xsi:type="ShowTaskpane"><SourceLocation resid="Taskpane.Url"/></Action>
-                </Control>
-                <Control xsi:type="Button" id="SlideSCI.Assistant">
-                  <Label resid="Btn.Assistant.Label"/>
-                  <Supertip><Title resid="Btn.Assistant.Tip"/><Description resid="Btn.Assistant.Desc"/></Supertip>
-                  <Icon><bt:Image size="16" resid="Img.Assistant.16"/><bt:Image size="32" resid="Img.Assistant.32"/><bt:Image size="80" resid="Img.Assistant.80"/></Icon>
-                  <Action xsi:type="ExecuteFunction"><FunctionName>SlideSCIAssistant</FunctionName></Action>
                 </Control>
                 <Control xsi:type="Button" id="SlideSCI.Settings">
                   <Label resid="Btn.Settings.Label"/>
@@ -652,9 +646,6 @@
         <bt:Image id="Img.Open.16" DefaultValue="https://localhost:3443/assets/ribbon/open-16.png"/>
         <bt:Image id="Img.Open.32" DefaultValue="https://localhost:3443/assets/ribbon/open-32.png"/>
         <bt:Image id="Img.Open.80" DefaultValue="https://localhost:3443/assets/ribbon/open-80.png"/>
-        <bt:Image id="Img.Assistant.16" DefaultValue="https://localhost:3443/assets/ribbon/assistant-16.png"/>
-        <bt:Image id="Img.Assistant.32" DefaultValue="https://localhost:3443/assets/ribbon/assistant-32.png"/>
-        <bt:Image id="Img.Assistant.80" DefaultValue="https://localhost:3443/assets/ribbon/assistant-80.png"/>
         <bt:Image id="Img.Settings.16" DefaultValue="https://localhost:3443/assets/ribbon/settings-16.png"/>
         <bt:Image id="Img.Settings.32" DefaultValue="https://localhost:3443/assets/ribbon/settings-32.png"/>
         <bt:Image id="Img.Settings.80" DefaultValue="https://localhost:3443/assets/ribbon/settings-80.png"/>
@@ -667,7 +658,7 @@
         <bt:String id="Grp.Science" DefaultValue="科研标注"/>
         <bt:String id="Grp.Content" DefaultValue="内容插入"/>
         <bt:String id="Grp.Media" DefaultValue="素材与导出"/>
-        <bt:String id="Grp.Help" DefaultValue="助手与设置"/>
+        <bt:String id="Grp.Help" DefaultValue="面板与设置"/>
         <bt:String id="Btn.Arrange.Label" DefaultValue="图片排列"/>
         <bt:String id="Btn.Arrange.Tip" DefaultValue="图片排列"/>
         <bt:String id="Btn.Insert.Label" DefaultValue="插入图片"/>
@@ -696,8 +687,6 @@
         <bt:String id="Btn.Export.Tip" DefaultValue="导出页面"/>
         <bt:String id="Btn.Open.Label" DefaultValue="打开面板"/>
         <bt:String id="Btn.Open.Tip" DefaultValue="打开 SlideSCI"/>
-        <bt:String id="Btn.Assistant.Label" DefaultValue="AI 助手"/>
-        <bt:String id="Btn.Assistant.Tip" DefaultValue="AI 助手"/>
         <bt:String id="Btn.Settings.Label" DefaultValue="设置与帮助"/>
         <bt:String id="Btn.Settings.Tip" DefaultValue="设置与帮助"/>
         <bt:String id="Mnu.Align.Label" DefaultValue="对齐"/>
@@ -774,8 +763,7 @@
         <bt:String id="Btn.LibrarySave.Desc" DefaultValue="将选中形状保存至素材库。"/>
         <bt:String id="Btn.Export.Desc" DefaultValue="按范围、格式和 DPI 导出当前或全部页面。"/>
         <bt:String id="Btn.Open.Desc" DefaultValue="显示 SlideSCI 侧边栏并恢复上次使用的分类。"/>
-        <bt:String id="Btn.Assistant.Desc" DefaultValue="打开 AI 助手对话与工具调用。"/>
-        <bt:String id="Btn.Settings.Desc" DefaultValue="查看版本、帮助与开发者信息。"/>
+        <bt:String id="Btn.Settings.Desc" DefaultValue="查看偏好设置、版本与帮助信息。"/>
         <bt:String id="Mnu.Align.Desc" DefaultValue="六种对象对齐方式；多选时以最先选中的对象为基准。"/>
         <bt:String id="Mnu.Size.Desc" DefaultValue="设置间距、均匀分布，或复制粘贴宽高。"/>
         <bt:String id="Mnu.Position.Desc" DefaultValue="复制、粘贴或交换位置，也可以复制标注相对位置。"/>
