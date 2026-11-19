@@ -207,15 +207,17 @@ async function start() {
   }
   const trusted = await trustCertificate();
   const certificate = await fs.readFile(path.join(state, 'tls/localhost.crt'));
-  const reservations = [];
-  try {
-    const addresses = [...new Set((await lookup('localhost', { all: true })).map(value => value.address))];
-    if (!addresses.length || addresses.some(address => !['127.0.0.1', '::1'].includes(address))) throw new Error('localhost 必须仅解析到回环地址。');
-    reservations.push(await reserve(3000, '127.0.0.1'));
-    for (const address of addresses) reservations.push(await reserve(3443, address));
+  if (!process.env.SLIDESCI_LAUNCHCTL) {
+    const reservations = [];
+    try {
+      const addresses = [...new Set((await lookup('localhost', { all: true })).map(value => value.address))];
+      if (!addresses.length || addresses.some(address => !['127.0.0.1', '::1'].includes(address))) throw new Error('localhost 必须仅解析到回环地址。');
+      reservations.push(await reserve(3000, '127.0.0.1'));
+      for (const address of addresses) reservations.push(await reserve(3443, address));
+    }
+    catch (error) { for (const close of reservations) await close(); throw new Error(`本机端口 3000 或 3443 已被占用，未启动其他服务：${error.code || error.message}`); }
+    for (const close of reservations) await close();
   }
-  catch (error) { for (const close of reservations) await close(); throw new Error(`本机端口 3000 或 3443 已被占用，未启动其他服务：${error.code || error.message}`); }
-  for (const close of reservations) await close();
   const logFile = path.join(state, 'service.log');
   // Keep one previous log so a long-lived installation never grows the log without bound.
   const logSize = await fs.stat(logFile).then(item => item.size, () => 0);
