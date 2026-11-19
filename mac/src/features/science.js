@@ -267,6 +267,44 @@ async function applyZoomEntriesInternal(ctx, sources, entries) {
   await ctx.services.request('images/settings', { values: { zoom: entries.at(-1) ? { ...entries.at(-1), key: undefined, sourceState: undefined, markerState: undefined, zoomState: undefined } : zoomDefaults } });
 }
 
+export async function reconcileSlide(ctx) {
+  return scientificMutation(ctx, async () => {
+    let context = await ctx.host.context({ scope: 'slide' });
+    context = await synchronizeUngroupedScale(ctx, context);
+    const sources = context.shapes.filter(s => isImage(s) && tag(s, RECORDS_TAG));
+    for (const initial of sources) {
+      const sourceUUID = tag(initial, UUID_TAG); let source = findUUID(context, sourceUUID);
+      const records = recordsOf(source), next = [], commands = []; let changed = false;
+      if (context.shapes.filter(s => tag(s, UUID_TAG) === sourceUUID).length > 1) continue;
+      for (const record of records) {
+        const markers = roles(context, record.key, 'marker'), zooms = roles(context, record.key, 'zoom');
+        // Same-slide copied links are ambiguous: preserve them without connecting unrelated shapes.
+        if (markers.length > 1 || zooms.length > 1) { next.push(record); continue; }
+        const marker = markers[0], zoom = zooms[0], guides = roles(context, record.key, 'guide');
+        if (!zoom) { const ids = [marker, ...guides].filter(Boolean).map(s => s.id); if (ids.length) commands.push({ op: 'delete', ids }); changed = true; continue; }
+        if (!marker) { commands.push({ op: 'update', id: zoom.id, properties: { tags: { [ZOOM_TAG]: '' } } }); if (guides.length) commands.push({ op: 'delete', ids: guides.map(s => s.id) }); changed = true; continue; }
+        const sourceMoved = !near(record.sourceState, geometry(source)), markerMoved = !near(record.markerState, geometry(marker)), zoomMoved = !near(record.zoomState, geometry(zoom));
+        const signatureChanged = sourceSignature(source) !== record.sourceSignature;
+        const expectedGuides = record.guides ? guideSegments(source, marker, zoom, record.extent) : [];
+        const guidesChanged = guides.length !== expectedGuides.length || guides.some((guide, index) => !near(geometry(guide), { ...geometry(guide), ...lineBounds(expectedGuides[index]) }));
+        if (!sourceMoved && !markerMoved && !zoomMoved && !signatureChanged && !guidesChanged) { next.push(record); continue; }
+        const options = { ...record, region: markerMoved ? relativeRegion(source, marker) : record.region };
+        if (marker.line) { options.color = marker.line.color || options.color; options.lineWidth = marker.line.width || options.lineWidth; options.dash = marker.line.dashStyle || options.dash; }
+        const result = await createOrUpdateZoom(ctx, context, source, options);
+        context = result.context; next.push(result.record); changed = true; source = findUUID(context, sourceUUID);
+      }
+      if (changed) {
+        commands.push({ op: 'update', id: source.id, properties: { tags: { [RECORDS_TAG]: serializeTag(next) } } });
+        context = await ctx.host.apply(commands);
+      }
+    }
+    // Removing the source detaches retained zoom pictures and removes its region/guide annotations.
+    const live = new Set(context.shapes.filter(isImage).map(s => tag(s, UUID_TAG))), orphanCommands = [];
+    for (const shape of context.shapes) { const link = parse(tag(shape, ZOOM_TAG)); if (!link || live.has(link.sourceUUID)) continue; orphanCommands.push(link.role === 'zoom' ? { op: 'update', id: shape.id, properties: { tags: { [ZOOM_TAG]: '' } } } : { op: 'delete', ids: [shape.id] }); }
+    if (orphanCommands.length) await ctx.host.apply(orphanCommands);
+  });
+}
+
 const reconcilers = new WeakMap();
 export function startScientificReconciliation(ctx, onError = error => ctx.services.reportError?.(error)) {
   const existing = reconcilers.get(ctx.host); if (existing) { existing.users++; return () => existing.release(); }
@@ -277,41 +315,7 @@ export function startScientificReconciliation(ctx, onError = error => ctx.servic
     if (disposed) return;
     if (mutations.get(ctx.host)) { timer = setTimeout(run, 80); return; }
     busy = true;
-    try {
-      let context = await ctx.host.context({ scope: 'slide' });
-      context = await synchronizeUngroupedScale(ctx, context);
-      const sources = context.shapes.filter(s => isImage(s) && tag(s, RECORDS_TAG));
-      for (const initial of sources) {
-        const sourceUUID = tag(initial, UUID_TAG); let source = findUUID(context, sourceUUID);
-        const records = recordsOf(source), next = [], commands = []; let changed = false;
-        if (context.shapes.filter(s => tag(s, UUID_TAG) === sourceUUID).length > 1) continue;
-        for (const record of records) {
-          const markers = roles(context, record.key, 'marker'), zooms = roles(context, record.key, 'zoom');
-          // Same-slide copied links are ambiguous: preserve them without connecting unrelated shapes.
-          if (markers.length > 1 || zooms.length > 1) { next.push(record); continue; }
-          const marker = markers[0], zoom = zooms[0], guides = roles(context, record.key, 'guide');
-          if (!zoom) { const ids = [marker, ...guides].filter(Boolean).map(s => s.id); if (ids.length) commands.push({ op: 'delete', ids }); changed = true; continue; }
-          if (!marker) { commands.push({ op: 'update', id: zoom.id, properties: { tags: { [ZOOM_TAG]: '' } } }); if (guides.length) commands.push({ op: 'delete', ids: guides.map(s => s.id) }); changed = true; continue; }
-          const sourceMoved = !near(record.sourceState, geometry(source)), markerMoved = !near(record.markerState, geometry(marker)), zoomMoved = !near(record.zoomState, geometry(zoom));
-          const signatureChanged = sourceSignature(source) !== record.sourceSignature;
-          const expectedGuides = record.guides ? guideSegments(source, marker, zoom, record.extent) : [];
-          const guidesChanged = guides.length !== expectedGuides.length || guides.some((guide, index) => !near(geometry(guide), { ...geometry(guide), ...lineBounds(expectedGuides[index]) }));
-          if (!sourceMoved && !markerMoved && !zoomMoved && !signatureChanged && !guidesChanged) { next.push(record); continue; }
-          const options = { ...record, region: markerMoved ? relativeRegion(source, marker) : record.region };
-          if (marker.line) { options.color = marker.line.color || options.color; options.lineWidth = marker.line.width || options.lineWidth; options.dash = marker.line.dashStyle || options.dash; }
-          const result = await createOrUpdateZoom(ctx, context, source, options);
-          context = result.context; next.push(result.record); changed = true; source = findUUID(context, sourceUUID);
-        }
-        if (changed) {
-          commands.push({ op: 'update', id: source.id, properties: { tags: { [RECORDS_TAG]: serializeTag(next) } } });
-          context = await ctx.host.apply(commands);
-        }
-      }
-      // Removing the source detaches retained zoom pictures and removes its region/guide annotations.
-      const live = new Set(context.shapes.filter(isImage).map(s => tag(s, UUID_TAG))), orphanCommands = [];
-      for (const shape of context.shapes) { const link = parse(tag(shape, ZOOM_TAG)); if (!link || live.has(link.sourceUUID)) continue; orphanCommands.push(link.role === 'zoom' ? { op: 'update', id: shape.id, properties: { tags: { [ZOOM_TAG]: '' } } } : { op: 'delete', ids: [shape.id] }); }
-      if (orphanCommands.length) await ctx.host.apply(orphanCommands);
-    } catch (error) { onError(error); }
+    try { await reconcileSlide(ctx); } catch (error) { onError(error); }
     finally { busy = false; if (pending && !disposed) { pending = false; timer = setTimeout(run, 80); } }
   };
   // A selection change cannot move or restyle a linked picture; skip the full slide read it would cost.
@@ -322,8 +326,8 @@ export function startScientificReconciliation(ctx, onError = error => ctx.servic
 }
 
 async function mountScale(container, ctx) {
-  const toolbar = element('div'), load = element('button', '读取所选图片'), apply = element('button', '应用到所选图片'), status = element('p', '', { role: 'status' }), fields = element('fieldset'), preview = element('canvas', null, { width: 600, height: 340 });
-  fields.append(element('legend', 'FOV 与可编辑比例尺')); toolbar.append(load, apply); container.append(toolbar, fields, preview, status);
+  const toolbar = element('div'), load = element('button', '读取所选图片'), apply = element('button', '应用到所选图片'), sync = element('button', '同步当前页'), status = element('p', '', { role: 'status' }), fields = element('fieldset'), preview = element('canvas', null, { width: 600, height: 340 });
+  fields.append(element('legend', 'FOV 与可编辑比例尺')); toolbar.append(load, apply, sync); container.append(toolbar, fields, preview, status);
   const fovControls = { width: control(fields, '原图 FOV 宽度（0 为未标定）', 'number', 0), height: control(fields, '原图 FOV 高度（0 为未标定）', 'number', 0), unit: control(fields, 'FOV 单位', 'select', 'μm', unitOptions) };
   const controls = {
     vertical: control(fields, '纵向比例尺', 'checkbox', false), widthMicrometers: control(fields, '横向长度（μm，0 隐藏）', 'number', 50), heightMicrometers: control(fields, '纵向长度（μm，0 隐藏）', 'number', 50), lengthUnit: control(fields, '显示单位', 'select', 'μm', unitOptions), thicknessPoints: control(fields, '厚度（pt）', 'number', 3), showText: control(fields, '显示文字', 'checkbox', true), barColor: control(fields, '比例尺颜色', 'color', '#ffffff'), fontColor: control(fields, '文字颜色', 'color', '#ffffff'), fontName: control(fields, '字体', 'text', 'Arial'), fontSize: control(fields, '字号（pt）', 'number', 14), bold: control(fields, '加粗', 'checkbox', true), corner: control(fields, '位置', 'select', 'BottomRight', [{ value: 'TopLeft', label: '左上' }, { value: 'BottomLeft', label: '左下' }, { value: 'TopRight', label: '右上' }, { value: 'BottomRight', label: '右下' }]), groupWithImage: control(fields, '与图片组合', 'checkbox', true)
@@ -347,12 +351,13 @@ async function mountScale(container, ctx) {
   fields.addEventListener('input', draw);
   load.onclick = async () => { try { shapes = pictures(await ctx.host.context()); const fov = fovOf(shapes[0]) || { width: 0, height: 0, unit: 'μm' }; const saved = await ctx.services.request('images/settings', {}); setControls(fovControls, fov); setControls(controls, scaleOf(shapes[0]) || saved.scale || defaultScale); const rendered = await ctx.services.request('images/crop', { ...await imageFor(ctx, shapes[0]), region: { x: 0, y: 0, width: 1, height: 1, rotation: 0 }, maximum: 800 }); image = new Image(); image.onload = () => { if (!disposed) draw(); }; image.src = `data:${rendered.mime};base64,${rendered.data}`; draw(); } catch (error) { errorStatus(status, error); } };
   apply.onclick = async () => { apply.disabled = true; try { if (!shapes.length) throw new Error('请先读取所选图片。'); const fov = validFov({ ...valuesOf(fovControls), source: '手动设置' }), s = valuesOf(controls); for (const shape of shapes) scaleLayout(shape, visibleFov(shape, fov), s); for (const shape of shapes) await applyScaleBar(ctx, shape, fov, s); status.textContent = `已更新 ${shapes.length} 张图片的 FOV 与比例尺。`; } catch (error) { errorStatus(status, error); } finally { apply.disabled = false; } };
+  sync.onclick = async () => { sync.disabled = true; try { await reconcileSlide(ctx); status.textContent = '已同步当前页的比例尺与放大图。'; } catch (error) { errorStatus(status, error); } finally { sync.disabled = false; } };
   return () => { disposed = true; };
 }
 
 async function mountZoom(container, ctx) {
-  const toolbar = element('div'), load = element('button', '读取所选图片/矩形'), add = element('button', '新增区域'), remove = element('button', '删除当前区域'), fit = element('button', '适合窗口'), apply = element('button', '应用全部区域'), status = element('p', '滚轮缩放；空格/中键拖动平移；拖动绘制区域、内部移动、角点缩放；Delete 删除。', { role: 'status' });
-  toolbar.append(load, add, remove, fit, apply); const list = control(toolbar, '当前区域', 'select', '', []);
+  const toolbar = element('div'), load = element('button', '读取所选图片/矩形'), add = element('button', '新增区域'), remove = element('button', '删除当前区域'), fit = element('button', '适合窗口'), apply = element('button', '应用全部区域'), sync = element('button', '同步当前页'), status = element('p', '滚轮缩放；空格/中键拖动平移；拖动绘制区域、内部移动、角点缩放；Delete 删除。', { role: 'status' });
+  toolbar.append(load, add, remove, fit, apply, sync); const list = control(toolbar, '当前区域', 'select', '', []);
   const canvas = element('canvas', null, { width: 760, height: 460, tabIndex: 0 }); canvas.setAttribute('aria-label', '多个放大区域编辑画布'); canvas.setAttribute('role', 'application');
   const fields = element('fieldset'); fields.append(element('legend', '每个区域独立设置')); container.append(toolbar, canvas, fields, status);
   const layoutPreview = element('canvas', null, { width: 760, height: 360 });
@@ -475,7 +480,8 @@ async function mountZoom(container, ctx) {
     } catch (error) { errorStatus(status, error); } finally { load.disabled = false; }
   }
   load.onclick = () => reload();
-  apply.onclick = async () => { apply.disabled = true; try { if (!sources.length) throw new Error('请先读取所选图片。'); saveFields(); entries.forEach(e => validateRegion(e.region)); await applyZoomEntries(ctx, sources, entries); status.textContent = '全部放大区域已更新；幻灯片中的移动、缩放、旋转和删除将自动同步。'; await reload({ refreshPreview: false }); } catch (error) { errorStatus(status, error); } finally { apply.disabled = false; } };
+  apply.onclick = async () => { apply.disabled = true; try { if (!sources.length) throw new Error('请先读取所选图片。'); saveFields(); entries.forEach(e => validateRegion(e.region)); await applyZoomEntries(ctx, sources, entries); status.textContent = '全部放大区域已更新；手动移动红框、放大图或裁剪后，点击“同步当前页”即可更新。'; await reload({ refreshPreview: false }); } catch (error) { errorStatus(status, error); } finally { apply.disabled = false; } };
+  sync.onclick = async () => { sync.disabled = true; try { await reconcileSlide(ctx); status.textContent = '已同步当前页的放大图、辅助线与比例尺。'; if (sources.length) await reload({ refreshPreview: false }); } catch (error) { errorStatus(status, error); } finally { sync.disabled = false; } };
   return () => { disposed = true; imageGeneration++; };
 }
 
@@ -510,8 +516,9 @@ export const actions = [
     }
     for (const { shape, fov } of calibrated) await setImageFov(ctx, shape, fov);
     return { count: shapes.length };
-  }) }
+  }) },
+  { id: 'science.sync', label: '同步当前页放大图与比例尺', section: '科学图片', description: '手动移动放大区域、放大图或裁剪图片后，按需同步当前页的放大图、辅助线和比例尺。', run: async ctx => { await reconcileSlide(ctx); return { message: '已同步当前页的放大图与比例尺。' }; } }
 ];
 export const panels = [{ id: 'science.scale', label: 'FOV 与比例尺预览', section: '科学图片', mount: mountScale }, { id: 'science.zoom', label: '多个放大区域', section: '科学图片', mount: mountZoom }];
-// Mount this once for the taskpane lifetime, including while scientific panels are closed.
+// Kept for compatibility; scientific reconciliation now runs on demand instead of polling in the background.
 export const initialize = ctx => startScientificReconciliation(ctx);

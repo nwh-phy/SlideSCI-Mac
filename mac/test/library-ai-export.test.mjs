@@ -5,8 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import JSZip from 'jszip';
 import { libraryHandlers } from '../lib/library.mjs';
-import { aiHandlers, decodeCompletion, endpoint } from '../lib/ai.mjs';
-import { validateNativeCommands } from '../lib/ai-commands.mjs';
 import { pageIndices } from '../src/features/export.js';
 
 const preview = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6kGQAAAAASUVORK5CYII=';
@@ -67,49 +65,6 @@ test('library imports Windows ZIP layout and applies explicit conflict policy', 
   assert.equal((await libraryHandlers.list({ query: '组合' }, env)).items.length, 2);
 });
 
-const context = { slideIndex: 0, shapes: [{ id: 'one' }], slides: [{ index: 0, shapes: [{ id: 'one' }] }, { index: 1, shapes: [{ id: 'two' }] }] };
-test('AI validates native target identities and properties across slides and sequential deletion', () => {
-  const commands = [{ op: 'update', slideIndex: 1, id: 'two', properties: { font: { color: '#123456' } } }];
-  assert.deepEqual(validateNativeCommands(commands, context), commands);
-  assert.throws(() => validateNativeCommands([{ op: 'update', id: 'two', properties: { text: 'x' } }], context), /不存在/u);
-  assert.throws(() => validateNativeCommands([{ op: 'update', id: 'one', properties: { width: -2 } }], context), /大于0/u);
-  assert.throws(() => validateNativeCommands([{ op: 'delete', ids: ['one'] }, { op: 'update', id: 'one', properties: { text: 'stale' } }], context), /不存在/u);
-  assert.throws(() => validateNativeCommands([{ op: 'deleteSlides', indices: [0, 1] }], context), /至少一页/u);
-  assert.throws(() => validateNativeCommands([{ op: 'update', id: 'one', properties: { javascript: 'arbitrary code' } }], context), /格式/u);
-  assert.doesNotThrow(() => validateNativeCommands([{ op: 'moveSlide', index: 0, toIndex: 1 }, { op: 'update', id: 'one', slideIndex: 1, properties: { text: 'moved' } }], context));
-});
-
-function sseResponse(frames, chunkSize = 3) {
-  const bytes = new TextEncoder().encode(frames.join('\r\n\r\n') + '\r\n\r\n');
-  return new Response(new ReadableStream({ start(controller) { for (let index = 0; index < bytes.length; index += chunkSize) controller.enqueue(bytes.slice(index, index + chunkSize)); controller.close(); } }), { headers: { 'Content-Type': 'text/event-stream' } });
-}
-test('AI assembles UTF8 SSE chunks and tool arguments, and exposes real content deltas', async () => {
-  const frames = [
-    'data: ' + JSON.stringify({ choices: [{ delta: { content: '处理中文' } }] }),
-    'data: ' + JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'edit_presentation', arguments: '{"commands":[' } }] } }] }),
-    'data: ' + JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"op":"delete","ids":["one"]}]}' } }] } }] }),
-    'data: ' + JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
-    'data: [DONE]'
-  ];
-  const job = { events: [] }; const message = await decodeCompletion(sseResponse(frames), job);
-  assert.equal(message.content, '处理中文'); assert.equal(message.tool_calls[0].id, 'call_1');
-  assert.deepEqual(JSON.parse(message.tool_calls[0].function.arguments), { commands: [{ op: 'delete', ids: ['one'] }] });
-  assert.equal(job.events[0].text, '处理中文');
-  await assert.rejects(decodeCompletion(sseResponse([frames[0]]), { events: [] }), /中断/u);
-  await assert.rejects(decodeCompletion(new Response('{"error":{"message":"rate limited"}}', { status: 429 }), { events: [] }), /429.*rate limited/u);
-});
-
-test('AI profiles persist nonsecrets while keys are retained only by native keychain API', async t => {
-  const env = await environment(t);
-  const saved = await aiHandlers.saveProfile({ id: 'test', name: 'Test', baseUrl: 'http://127.0.0.1:12345/v1', model: 'fixture', secret: 'unit-test-secret', systemPrompt: 'test prompt' }, env);
-  assert.equal(saved.activeProfileId, 'test'); assert.equal(saved.profiles.find(item => item.id === 'test').hasKey, true);
-  const persisted = await readFile(path.join(env.storageDir, 'ai', 'profiles.json'), 'utf8');
-  assert.equal(persisted.includes('unit-test-secret'), false);
-  assert.equal(JSON.stringify(saved).includes('unit-test-secret'), false);
-  assert.equal(endpoint('https://api.example.com/v1/'), 'https://api.example.com/v1/chat/completions');
-  assert.throws(() => endpoint('http://untrusted.example/v1'), /HTTPS/u);
-});
-
 test('export parses page ranges, deduplicates overlaps and rejects unavailable pages', () => {
   const slides = Array.from({ length: 6 }, (_, index) => ({ index }));
   const snapshot = { slides, slideIndex: 2, selectedSlideIndices: [3, 1, 3] };
@@ -118,16 +73,4 @@ test('export parses page ranges, deduplicates overlaps and rejects unavailable p
   assert.deepEqual(pageIndices('current', snapshot), [2]);
   assert.throws(() => pageIndices('custom', snapshot, '5-3'), /范围/u);
   assert.throws(() => pageIndices('custom', snapshot, '0,9'), /1到6/u);
-});
-
-test('AI streaming preserves UTF8 and split CRLF delimiters at every byte boundary', async () => {
-  const frames = [
-    'data: ' + JSON.stringify({ choices: [{ delta: { content: '中文第一行\n第二行' } }] }),
-    'data: ' + JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] }),
-    'data: [DONE]'
-  ];
-  for (const size of [1, 2, 7, 1000]) {
-    const message = await decodeCompletion(sseResponse(frames, size), { events: [] });
-    assert.equal(message.content, '中文第一行\n第二行');
-  }
 });

@@ -33,62 +33,102 @@ const sourcePath = shape => {
   const record = lines.filter(x => x.startsWith('原图路径：') || x.startsWith('视频路径：')).at(-1);
   return record ? record.slice(record.indexOf('：') + 1) : parse(tag(shape, 'SLIDESCI_SOURCE_PATH'), tag(shape, 'SLIDESCI_SOURCE_PATH'));
 };
+const tiffPattern = /\.tiff?$/i;
 function availableName(name, used) { let value = name, i = 2; const dot = name.lastIndexOf('.'), stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : ''; while (used.has(value.toLocaleLowerCase())) value = `${stem} (${i++})${ext}`; used.add(value.toLocaleLowerCase()); return value; }
 export async function insertSourceFiles(ctx, files, { position, shapeIds = [] } = {}) {
   if (!files?.length) return { count: 0 };
+  const updating = Array.isArray(shapeIds) && shapeIds.length > 0;
   let context = await ctx.host.context({ scope: 'slide' });
-  const used = new Set(context.shapes.map(s => s.name.toLocaleLowerCase())), errors = [], inserted = [];
+  const used = new Set(context.shapes.map(s => s.name.toLocaleLowerCase())), errors = [], inserted = [], directUpdates = [];
+  let replaced = false;
+  async function flushDirectUpdates() {
+    if (!directUpdates.length) return;
+    const pending = directUpdates.splice(0, directUpdates.length);
+    try {
+      await ctx.host.apply(pending.map(item => item.command), { readback: false });
+      for (const { existing, metadata } of pending) {
+        existing.name = metadata.name;
+        existing.alternativeText = metadata.alternativeText;
+        existing.tags = { ...(existing.tags || {}), ...metadata.tags };
+        inserted.push(existing.id);
+      }
+    } catch (error) {
+      for (const item of pending) errors.push(`${item.name}：${error.message}`);
+    }
+  }
   const media = files.map(file => {
     const source = file.path, name = file.name || source?.split('/').at(-1) || '图片.png';
-    return { name, video: videoPattern.test(name) || !!file.mime?.startsWith('video/'), image: imagePattern.test(name) || !!file.mime?.startsWith('image/') };
+    const tiff = tiffPattern.test(name) || /tiff/i.test(file.mime || '');
+    return { name, tiff, video: videoPattern.test(name) || !!file.mime?.startsWith('video/'), image: imagePattern.test(name) || !!file.mime?.startsWith('image/') };
   });
+  const needsNormalize = index => {
+    const kind = media[index];
+    return kind.image && !kind.video && (!updating || kind.tiff);
+  };
   // Decode the next small batch while this one is inserted, so a multi-file paste does not wait decode→insert→decode.
   const load = start => concurrentMap(files.slice(start, start + RENDER_LIMIT), RENDER_LIMIT, (file, offset) => {
-    const kind = media[start + offset];
-    return kind.image && !kind.video ? ctx.services.request('images/normalize', file) : null;
+    return needsNormalize(start + offset) ? ctx.services.request('images/normalize', file) : null;
   });
   const batches = [];
   let started = 0, taken = 0, current = null;
   const ensure = count => { while (started < count) { batches[started] = load(started * RENDER_LIMIT); started++; } };
   ensure(1);
   for (let index = 0; index < files.length; index++) {
-    const file = files[index], { name, video, image } = media[index], source = file.path;
+    const file = files[index], { name, video, image, tiff } = media[index], source = file.path;
     try {
       if (!video && !image) throw new Error('不支持的图片或视频格式。');
       if (!source && video) throw new Error('插入视频需要从原生文件选择器取得文件路径。');
+      const existing = updating ? context.shapes.find(s => String(s.id) === String(shapeIds[index])) : null;
+      // Updating pasted shapes must never fall back to inserting duplicate copies if a shape was
+      // already replaced, deleted, or belongs to a different slide.
+      if (updating && !existing) continue;
+      const target = existing ? content(existing) : null;
       const group = Math.floor(index / RENDER_LIMIT);
       if (group >= taken) { taken = group + 1; current = batches[group]; batches[group] = null; ensure(group + 2); }
       const normalized = (await current)[index - group * RENDER_LIMIT];
-      let prepared;
-      if (video) prepared = { ...await videoSize(ctx, source), mime: videoMime(name, file.mime) };
-      else {
+      let prepared = null;
+      if (needsNormalize(index)) {
         if (normalized.error) throw normalized.error;
         prepared = normalized.value;
+      } else if (video && !existing) {
+        prepared = { ...await videoSize(ctx, source), mime: videoMime(name, file.mime) };
       }
-      const scale = Math.min(1, context.width * .9 / (prepared.width * .75), context.height * .9 / (prepared.height * .75));
-      const width = prepared.width * .75 * scale, height = prepared.height * .75 * scale;
-      const left = position ? Math.max(0, Math.min(context.width - width, position.x - width / 2)) : (context.width - width) / 2;
-      const top = position ? Math.max(0, Math.min(context.height - height, position.y - height / 2)) : (context.height - height) / 2;
-      const existing = context.shapes.find(s => s.id === shapeIds[index]), target = existing ? content(existing) : null;
       let alternativeText = existing?.alternativeText || '';
       if (source) alternativeText += `${alternativeText ? '\n' : ''}${video ? '视频路径：' : '原图路径：'}${source}`;
-      if (prepared.fov) alternativeText = writeRecord(alternativeText, FOV_PREFIX, prepared.fov);
+      if (prepared?.fov) alternativeText = writeRecord(alternativeText, FOV_PREFIX, prepared.fov);
       const metadata = { name: existing?.name || availableName(name, used), alternativeText, tags: { [UUID_TAG]: tag(existing, UUID_TAG) || uuid(), SLIDESCI_SOURCE_PATH: source ? serializeTag(source) : '', SLIDESCI_SOURCE_NAME: serializeTag(name) } };
-      const vectorSource = /image\/(?:x-)?(?:emf|wmf)|image\/(?:x-ms-)?bmp/i.test(prepared.mime || '');
-      const imageArguments = vectorSource && source ? { path: source } : { data: prepared.data };
       if (existing) {
-        context = await ctx.host.apply([{ op: 'update', id: existing.id, properties: metadata }]);
-        if (!video) context = await ctx.host.apply([{ op: 'replaceImage', id: target.id, data: prepared.data, mime: prepared.mime, source, preserveCrop: true, ...(vectorSource && source ? { path: source } : {}) }]);
+        if (!video && tiff && prepared) {
+          await flushDirectUpdates();
+          context = await ctx.host.apply([{ op: 'update', id: existing.id, properties: metadata }]);
+          const vectorSource = /image\/(?:x-)?(?:emf|wmf)|image\/(?:x-ms-)?bmp/i.test(prepared.mime || '');
+          context = await ctx.host.apply([{ op: 'replaceImage', id: target.id, data: prepared.data, mime: prepared.mime, source, preserveCrop: true, ...(vectorSource && source ? { path: source } : {}) }]);
+          replaced = true;
+          const created = context.shapes.find(s => tag(s, UUID_TAG) === metadata.tags[UUID_TAG]);
+          if (created) inserted.push(created.id);
+        } else {
+          // Non-TIFF images and videos pasted by the host already carry their embedded media;
+          // batch metadata-only updates so pasting many figures takes one lightweight host call.
+          directUpdates.push({ existing, metadata, name, command: { op: 'update', id: existing.id, properties: metadata } });
+        }
       } else {
+        await flushDirectUpdates();
+        const scale = Math.min(1, context.width * .9 / (prepared.width * .75), context.height * .9 / (prepared.height * .75));
+        const width = prepared.width * .75 * scale, height = prepared.height * .75 * scale;
+        const left = position ? Math.max(0, Math.min(context.width - width, position.x - width / 2)) : (context.width - width) / 2;
+        const top = position ? Math.max(0, Math.min(context.height - height, position.y - height / 2)) : (context.height - height) / 2;
+        const vectorSource = /image\/(?:x-)?(?:emf|wmf)|image\/(?:x-ms-)?bmp/i.test(prepared.mime || '');
+        const imageArguments = vectorSource && source ? { path: source } : { data: prepared.data };
         const command = { op: video ? 'insertMedia' : 'insertImage', ...(video ? { path: source } : imageArguments), mime: prepared.mime, source, left, top, width, height, ...metadata };
         try { context = await ctx.host.apply([command]); }
         catch (error) { await removeInserted(ctx, [metadata.tags[UUID_TAG]], error); throw error; }
+        const created = context.shapes.find(s => tag(s, UUID_TAG) === metadata.tags[UUID_TAG]);
+        if (created) inserted.push(created.id);
       }
-      const created = context.shapes.find(s => tag(s, UUID_TAG) === metadata.tags[UUID_TAG]);
-      if (created) inserted.push(created.id);
     } catch (error) { errors.push(`${name}：${error.message}`); }
   }
-  if (inserted.length) await ctx.host.apply([{ op: 'select', ids: inserted }]);
+  await flushDirectUpdates();
+  if (inserted.length && (!updating || replaced)) await ctx.host.apply([{ op: 'select', ids: inserted }]);
   if (errors.length) throw new Error(`已插入或记录 ${inserted.length} 个文件；以下文件失败：\n${errors.join('\n')}`);
   return { count: inserted.length };
 }

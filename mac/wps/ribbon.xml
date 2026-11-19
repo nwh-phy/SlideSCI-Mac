@@ -84,10 +84,9 @@
           </menu>
           <button id="SlideSciLibrarySaveButton" label="保存至素材库" onAction="SlideSciLibrarySave" screentip="将选中形状保存为素材" getImage="SlideSciGetImage"/>
         </group>
-        <group id="SlideSciHelpGroup" label="助手与设置">
+        <group id="SlideSciHelpGroup" label="面板与设置">
           <button id="SlideSciOpenButton" label="打开面板" size="large" onAction="SlideSciOpen" screentip="打开 SlideSCI 侧边栏" getImage="SlideSciGetImage"/>
-          <button id="SlideSciAIShortcut" label="AI 助手" onAction="SlideSciOpenAI" screentip="打开 AI 助手对话" getImage="SlideSciGetImage"/>
-          <button id="SlideSciSettingsButton" label="设置与帮助" onAction="SlideSciAbout" screentip="版本、帮助与开发者信息" getImage="SlideSciGetImage"/>
+          <button id="SlideSciSettingsButton" label="设置与帮助" onAction="SlideSciAbout" screentip="偏好设置、版本与帮助信息" getImage="SlideSciGetImage"/>
         </group>
       </tab>
     </tabs>

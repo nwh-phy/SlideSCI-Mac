@@ -80,16 +80,39 @@ test('installer trusts its localhost certificate only with consent, swaps trust 
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
-test('Start names a host whose data macOS refuses to Terminal before it starts the service', async () => {
+test('Start configures LaunchAgent passively without probing host containers, and Uninstall removes it', async () => {
   const { home, runInstaller } = await fixture();
   const cache = path.join(home, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/tmp/SlideSCI-Mac');
+  const launchState = path.join(home, 'launchctl-state');
+  const fakeLaunchctl = path.join(home, 'fake-launchctl');
+  const fakeLaunchctlScript = `#!/usr/bin/env node
+const fs = require('node:fs'), path = require('node:path');
+const state = process.env.FAKE_LAUNCHCTL_STATE, args = process.argv.slice(2);
+fs.appendFileSync(path.join(state, 'calls.log'), args.join(' ') + '\\n');
+const loaded = path.join(state, 'loaded');
+if (args[0] === 'print') process.exit(fs.existsSync(loaded) ? 0 : 113);
+if (args[0] === 'bootstrap') { fs.writeFileSync(loaded, args.at(-1)); process.exit(0); }
+if (args[0] === 'bootout') { if (!fs.existsSync(loaded)) process.exit(3); fs.rmSync(loaded); process.exit(0); }
+process.exit(2);
+`;
   try {
+    await mkdir(launchState, { recursive: true });
+    await writeFile(fakeLaunchctl, fakeLaunchctlScript);
+    await chmod(fakeLaunchctl, 0o755);
     runInstaller('renew-certificate', ['--trust-certificate', 'no']);
     await mkdir(cache, { recursive: true });
     await chmod(cache, 0o500);
-    let output = '';
-    try { output = runInstaller('start', ['--trust-certificate', 'no']); } catch (error) { output = String(error.stdout) + String(error.stderr); }
-    assert.match(output, /警告：macOS 拒绝“终端”访问 WPS 的数据/);
+    const output = runInstaller('start', ['--trust-certificate', 'no'], { SLIDESCI_LAUNCHCTL: fakeLaunchctl, FAKE_LAUNCHCTL_STATE: launchState });
+    assert.doesNotMatch(output, /拒绝“终端”访问/, 'Start stays passive and does not probe host containers');
+    assert.match(output, /登录自动运行/);
+    const plist = path.join(home, 'Library/LaunchAgents/com.slidesci.mac.service.plist');
+    const plistText = await readFile(plist, 'utf8');
+    assert.match(plistText, /<key>RunAtLoad<\/key><true\/>/);
+    assert.match(plistText, /com\.slidesci\.mac\.service/);
+    const stopOut = runInstaller('stop', [], { SLIDESCI_LAUNCHCTL: fakeLaunchctl, FAKE_LAUNCHCTL_STATE: launchState });
+    assert.match(stopOut, /已停止 SlideSCI 后台自启服务/);
+    runInstaller('uninstall', [], { SLIDESCI_LAUNCHCTL: fakeLaunchctl, FAKE_LAUNCHCTL_STATE: launchState });
+    assert.equal(await readFile(plist, 'utf8').then(() => true, () => false), false, 'uninstall removes LaunchAgent plist');
   } finally { await chmod(cache, 0o700).catch(() => {}); await rm(home, { recursive: true, force: true }); }
 });
 

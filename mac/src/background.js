@@ -59,8 +59,12 @@ class BackgroundTracking {
     this.unsubscribers = [];
     this.controller = new AbortController();
     this.pending = [];
-    this.knownIds = null;
+    this.knownByScope = new Map();
     this.handledIds = new Set();
+    this.checkPromise = null;
+    this.checkAgain = false;
+    this.applyingDepth = 0;
+    this.syncingKnown = false;
     this.pendingPoll = null;
     this.pendingDeadline = 0;
     this.scienceCleanup = null;
@@ -111,11 +115,14 @@ class BackgroundTracking {
     try {
       const adapter = await this.hostAdapter();
       const context = await adapter.context({ scope: 'slide', geometry: true });
-      this.knownIds = new Set((context.shapes || []).map(shape => String(shape.id)));
+      this.recordKnown(context);
       if (typeof adapter.onChanged === 'function') {
-        this.hostUnsubscribe = adapter.onChanged(() => {
-          if (!this.stopped && this.pending.length) {
+        this.hostUnsubscribe = adapter.onChanged(change => {
+          if (this.stopped || this.applyingDepth > 0) return;
+          if (this.pending.length) {
             this.checkPending().catch(error => this.report(error, 'pending-host-change'));
+          } else if (change?.kind !== 'selection') {
+            this.refreshKnown().catch(error => this.report(error, 'shape-baseline'));
           }
         });
       }
@@ -198,6 +205,32 @@ class BackgroundTracking {
     this.considerMedia(name, payload);
   }
 
+  scopeOf(context) {
+    return `${context?.presentationId || ''}|${context?.slideId || ''}`;
+  }
+
+  recordKnown(context) {
+    if (!context) return new Set();
+    const scope = this.scopeOf(context);
+    const ids = new Set((context.shapes || []).map(shape => String(shape.id)));
+    this.knownByScope.delete(scope);
+    this.knownByScope.set(scope, ids);
+    if (this.knownByScope.size > 32) this.knownByScope.delete(this.knownByScope.keys().next().value);
+    return ids;
+  }
+
+  async refreshKnown() {
+    if (this.stopped || this.syncingKnown || this.applyingDepth > 0) return;
+    this.syncingKnown = true;
+    try {
+      const adapter = await this.hostAdapter();
+      const context = await adapter.context({ scope: 'slide', geometry: true });
+      if (!this.stopped && this.applyingDepth === 0) this.recordKnown(context);
+    } finally {
+      this.syncingKnown = false;
+    }
+  }
+
   considerMedia(name, payload) {
     if (!payload || !matchesHost(payload, this.host)) return;
     const clipboardImage = name === 'clipboardImage' || payload.type === 'clipboardImage';
@@ -210,17 +243,22 @@ class BackgroundTracking {
     const signature = clipboardImage
       ? `${this.host}|image|${payload.mime || ''}|${payload.data.length}`
       : `${this.host}|files|${files.map(file => file.path).join('|')}`;
+    const reason = payload.reason || '';
+    const channel = reason === 'drag' || reason === 'drop' ? 'drag' : 'clipboard';
     const now = Date.now();
-    this.pending = this.pending.filter(item => now - item.at < PENDING_LIFETIME && item.signature !== signature);
+    // Each pasteboard holds one current value; a newer clipboard or drag capture supersedes the old one.
+    this.pending = this.pending.filter(item => now - item.at < PENDING_LIFETIME && item.signature !== signature && item.channel !== channel);
+    const baselines = new Map([...this.knownByScope].map(([scope, ids]) => [scope, new Set(ids)]));
     const candidate = {
       signature,
+      channel,
       at: now,
-      baseline: this.knownIds ? new Set(this.knownIds) : null,
+      baselines,
       baselineReady: this.captureBaseline(),
       files,
       clipboard: clipboardImage ? { data: payload.data, mime: payload.mime || 'image/tiff' } : null,
       intercepted: payload.intercepted === true,
-      reason: payload.reason || '',
+      reason,
       position: validPosition(payload.position)
     };
     this.pending.push(candidate);
@@ -234,7 +272,7 @@ class BackgroundTracking {
       .then(adapter => adapter.context({ scope: 'slide', geometry: true }))
       .then(context => ({
         ids: new Set((context.shapes || []).map(shape => String(shape.id))),
-        scope: `${context.presentationId || ''}|${context.slideId || ''}`
+        scope: this.scopeOf(context)
       }))
       .catch(error => {
         this.report(error, 'paste-baseline');
@@ -264,23 +302,46 @@ class BackgroundTracking {
     this.pendingPoll = setTimeout(tick, FAST_POLL_INTERVAL);
   }
 
-  async checkPending() {
-    if (this.stopped || !this.pending.length) return;
+  checkPending() {
+    if (this.stopped || !this.pending.length) return Promise.resolve();
+    if (this.applyingDepth > 0) {
+      this.checkAgain = true;
+      return this.queue;
+    }
+    if (this.checkPromise) {
+      this.checkAgain = true;
+      return this.checkPromise;
+    }
+    this.checkPromise = (async () => {
+      try {
+        do {
+          this.checkAgain = false;
+          if (this.stopped || this.applyingDepth > 0 || !this.pending.length) break;
+          await this.runPendingCheck();
+        } while (!this.stopped && this.applyingDepth === 0 && this.checkAgain && this.pending.length);
+      } finally {
+        this.checkPromise = null;
+      }
+    })();
+    return this.checkPromise;
+  }
+
+  async runPendingCheck() {
     const now = Date.now();
     this.pending = this.pending.filter(item => now - item.at < PENDING_LIFETIME);
     if (!this.pending.length) return;
-    let context;
+    let adapter, light;
     try {
-      const adapter = await this.hostAdapter();
-      context = await adapter.context({ scope: 'slide', images: false });
+      adapter = await this.hostAdapter();
+      // Poll with lightweight geometry first; only export full slide metadata when a new picture/media appears.
+      light = await adapter.context({ scope: 'slide', geometry: true });
     } catch (error) {
       this.report(error, 'pending-context');
       return;
     }
-    if (this.stopped) return;
-    const scope = `${context.presentationId || ''}|${context.slideId || ''}`;
-    const existing = new Set((context.shapes || []).map(shape => String(shape.id)));
-    const selected = new Set((context.selectionIds || []).map(String));
+    if (this.stopped || this.applyingDepth > 0) return;
+    const scope = this.scopeOf(light);
+    const existing = new Set((light.shapes || []).map(shape => String(shape.id)));
     const handled = this.handledIds || (this.handledIds = new Set());
     const handledKey = id => `${scope}|${id}`;
     const candidates = this.pending.slice().sort((a, b) => b.at - a.at);
@@ -288,27 +349,94 @@ class BackgroundTracking {
       if (!item.baselineReady) continue;
       const snapshot = await item.baselineReady;
       item.baselineReady = null;
-      if (!item.intercepted) item.baseline = snapshot && snapshot.scope === scope ? snapshot.ids : null;
+      if (!snapshot) continue;
+      // On drop, the picture may already have landed; keep any pre-drop baseline recorded for this slide.
+      if (!(item.reason === 'drop' && item.baselines.has(snapshot.scope))) {
+        item.baselines.set(snapshot.scope, snapshot.ids);
+      }
+      if (!this.knownByScope.has(snapshot.scope)) this.knownByScope.set(snapshot.scope, new Set(snapshot.ids));
     }
+    let rich = null;
+    let scheduled = false;
+    let deferred = false;
     for (const item of candidates) {
-      const baseline = item.baseline || new Set();
-      const fresh = (context.shapes || []).filter(shape => {
+      let baseline = item.baselines.get(scope);
+      if (!baseline) {
+        if (this.knownByScope.has(scope)) {
+          baseline = new Set(this.knownByScope.get(scope));
+        } else {
+          // Never treat pre-existing pictures on a newly visited slide as freshly pasted.
+          baseline = new Set(existing);
+        }
+        item.baselines.set(scope, baseline);
+      }
+      const potential = (light.shapes || []).filter(shape => {
         const id = String(shape.id);
         if (baseline.has(id) || handled.has(handledKey(id))) return false;
-        if (shape.type !== 'picture' && shape.type !== 'media') return false;
-        if (hasSourceRecord(shape)) return false;
-        if (selected.has(id) || item.intercepted) return true;
-        return !item.baseline && now - item.at < 3000;
+        return shape.type === 'picture' || shape.type === 'media';
       });
+      if (!potential.length) continue;
+      // Multi-file pastes (e.g., 8 images from Finder) can land across several hundred ms in
+      // PowerPoint; wait briefly until all expected shapes appear or the count settles.
+      const expected = item.files.length || 1;
+      if (expected > 1 && potential.length < expected) {
+        const prev = item.partial;
+        if (!prev || prev.scope !== scope || prev.count !== potential.length) {
+          item.partial = { scope, count: potential.length, at: now };
+          deferred = true;
+          this.beginPendingObservation();
+          break;
+        }
+        if (now - prev.at < 800) {
+          deferred = true;
+          this.beginPendingObservation();
+          break;
+        }
+      }
+      item.partial = null;
+      if (!rich) {
+        try {
+          rich = await adapter.context({ scope: 'slide', images: false });
+        } catch (error) {
+          this.report(error, 'pending-context');
+          return;
+        }
+        if (this.stopped || this.applyingDepth > 0) return;
+        if (this.scopeOf(rich) !== scope) return;
+      }
+      const potentialIds = new Set(potential.map(shape => String(shape.id)));
+      const fresh = [];
+      for (const shape of rich.shapes || []) {
+        const id = String(shape.id);
+        if (!potentialIds.has(id)) continue;
+        if (hasSourceRecord(shape)) {
+          baseline.add(id);
+          handled.add(handledKey(id));
+          continue;
+        }
+        fresh.push(shape);
+      }
       if (!fresh.length) continue;
       this.pending = this.pending.filter(entry => entry !== item);
-      for (const shape of fresh) handled.add(handledKey(String(shape.id)));
+      for (const shape of fresh) {
+        const id = String(shape.id);
+        handled.add(handledKey(id));
+        baseline.add(id);
+      }
+      this.applyingDepth++;
+      scheduled = true;
       this.queue = this.queue.then(() => this.applySource(item, fresh)).catch(error => {
         this.status('更新粘贴图片的来源失败：' + messageOf(error), 'error');
         this.report(error, 'native-paste');
+      }).finally(() => {
+        this.applyingDepth = Math.max(0, this.applyingDepth - 1);
+        if (!this.stopped && this.checkAgain && this.pending.length) {
+          this.checkPending().catch(error => this.report(error, 'pending-after-apply'));
+        }
       });
+      break;
     }
-    this.knownIds = existing;
+    if (!scheduled && !deferred) this.recordKnown(light);
     if (handled.size > 300) this.handledIds = new Set([...handled].slice(-150));
   }
 
@@ -330,9 +458,22 @@ class BackgroundTracking {
       notify: (message, kind = 'info') => this.notify(message, kind),
       refresh: () => adapter.summary()
     };
-    await handleNativePaste(ctx, { files: files.slice(0, limit), position: candidate.position, shapeIds });
-    this.onEvent?.({ ...candidate, shapeIds });
-    this.status(`已记录 ${limit} 个粘贴图片的来源。`, 'success');
+    const result = await handleNativePaste(ctx, { files: files.slice(0, limit), position: candidate.position, shapeIds });
+    try {
+      const after = await adapter.context({ scope: 'slide', geometry: true });
+      const scope = this.scopeOf(after);
+      const ids = this.recordKnown(after);
+      for (const item of this.pending) {
+        if (item.baselines?.has(scope)) {
+          const set = item.baselines.get(scope);
+          for (const id of ids) set.add(id);
+        }
+      }
+    } catch { /* best effort baseline refresh after apply */ }
+    if (result?.count) {
+      this.onEvent?.({ ...candidate, shapeIds });
+      this.status(`已记录 ${result.count} 个粘贴图片的来源。`, 'success');
+    }
   }
 
   async materializeClipboard(candidate) {

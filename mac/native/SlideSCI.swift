@@ -37,15 +37,34 @@ func png(_ data: Data, contrast: Bool = false) throws -> Data {
 func pngInfo(_ data: Data) -> (width: Int, height: Int)? { NSBitmapImageRep(data: data).map { ($0.pixelsWide, $0.pixelsHigh) } }
 let supportedHosts: Set<String> = ["com.microsoft.Powerpoint", "com.kingsoft.wpsoffice.mac", "com.kingsoft.wpsoffice"]
 let mediaExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "tif", "tiff", "bmp", "svg", "emf", "wmf", "mp4", "m4v", "mov", "webm", "avi", "wmv", "asf", "mpg", "mpeg", "mpe"]
+let hostPasteboardPrefixes = ["com.microsoft.", "com.kingsoft.", "org.openxmlformats.", "com.apple.iwork."]
+func isHostInternalPasteboard(_ pb: NSPasteboard) -> Bool {
+    let types = pb.types?.map { $0.rawValue.lowercased() } ?? []
+    return types.contains { raw in hostPasteboardPrefixes.contains { raw.hasPrefix($0) } }
+}
+// PowerPoint/WPS copies and ordinary screenshots include an 8-bit TIFF fallback; only scientific
+// 16-bit or calibrated TIFF clipboard images need background normalization.
+func needsClipboardTIFF(_ data: Data) -> Bool {
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+          let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return false }
+    if let depth = props[kCGImagePropertyDepth] as? Int, depth > 8 { return true }
+    if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any],
+       let desc = tiff[kCGImagePropertyTIFFImageDescription] as? String {
+        let lower = desc.lowercased()
+        if lower.contains("imagej") || lower.contains("<ome") { return true }
+    }
+    return false
+}
 var mediaEventTap: CFMachPort?
 var pendingRestores: [String: (items: [[String: Data]], count: Int)] = [:]
 var ignoredPasteboardCounts: [String: Int] = [:]
 func interceptTIFF(_ pb: NSPasteboard, reason: String) {
     guard let host = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, supportedHosts.contains(host) else { return }
     let urls = fileURLs(pb), tiffURLs = urls.filter { ["tif", "tiff"].contains($0.pathExtension.lowercased()) }
-    guard (urls.count == 1 && tiffURLs.count == 1) || (urls.isEmpty && pb.data(forType: .tiff) != nil) else { return }
+    let rawTiff = urls.isEmpty && !isHostInternalPasteboard(pb) ? pb.data(forType: .tiff) : nil
+    guard (urls.count == 1 && tiffURLs.count == 1) || (rawTiff != nil && needsClipboardTIFF(rawTiff!)) else { return }
     do {
-        let data = try tiffURLs.first.map { try Data(contentsOf: $0) } ?? pb.data(forType: .tiff)!
+        let data = try tiffURLs.first.map { try Data(contentsOf: $0) } ?? rawTiff!
         let converted = try png(data, contrast: true), saved = snapshot(pb), item = NSPasteboardItem()
         item.setData(converted, forType: .png)
         if reason == "drop" {
@@ -57,7 +76,7 @@ func interceptTIFF(_ pb: NSPasteboard, reason: String) {
         pb.clearContents(); pb.writeObjects([item]); let replacedCount = pb.changeCount
         ignoredPasteboardCounts[pb.name.rawValue] = replacedCount
         pendingRestores[pb.name.rawValue] = (saved, replacedCount)
-        json(["type": "mediaSource", "reason": reason, "files": tiffURLs.map { ["path": $0.path, "name": $0.lastPathComponent] }, "original": data.base64EncodedString(), "mime": "image/tiff", "intercepted": true, "host": host, "timestamp": Date().timeIntervalSince1970 * 1000])
+        json(["type": "mediaSource", "reason": reason, "files": tiffURLs.map { ["path": $0.path, "name": $0.lastPathComponent] }, "original": data.base64EncodedString(), "mime": "image/tiff", "intercepted": true, "changeCount": replacedCount, "pasteboard": pb.name.rawValue, "host": host, "timestamp": Date().timeIntervalSince1970 * 1000])
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { if pb.changeCount == replacedCount { restore(saved, pb); ignoredPasteboardCounts[pb.name.rawValue] = pb.changeCount }; if pendingRestores[pb.name.rawValue]?.count == replacedCount { pendingRestores.removeValue(forKey: pb.name.rawValue) } }
     } catch { json(["type": "nativeError", "message": error.localizedDescription]) }
 }
@@ -85,10 +104,10 @@ do {
     case "readClipboardFiles": json(files(board))
     case "snapshotClipboard": json(snapshot(board).map { $0.mapValues { $0.base64EncodedString() } })
     case "restoreClipboard":
-        let values = (input["items"] as? [[String: String]] ?? []).map { $0.compactMapValues { Data(base64Encoded: $0) } }; restore(values, board); json([:])
+        let values = (input["items"] as? [[String: String]] ?? []).map { $0.compactMapValues { Data(base64Encoded: $0) } }; restore(values, board); json(["changeCount": board.changeCount])
     case "writeFileClipboard":
         let item = NSPasteboardItem(); item.setString(URL(fileURLWithPath: try required(input, "path")).absoluteString, forType: .fileURL)
-        board.clearContents(); board.writeObjects([item]); json([:])
+        board.clearContents(); board.writeObjects([item]); json(["changeCount": board.changeCount])
     case "writeClipboard":
         guard let data = Data(base64Encoded: try required(input, "data")) else { throw NSError(domain: "SlideSCI", code: 5, userInfo: [NSLocalizedDescriptionKey: "Invalid base64"]) }
         let mime = try required(input, "mime"); let item = NSPasteboardItem()
@@ -96,7 +115,7 @@ do {
         else if mime.hasPrefix("image/") { let converted = try png(data); item.setData(converted, forType: .png); if let rep = NSImage(data: converted)?.tiffRepresentation { item.setData(rep, forType: .tiff) } }
         else if mime.hasPrefix("text/") { item.setData(data, forType: mime == "text/html" ? .html : .string) }
         else { item.setData(data, forType: NSPasteboard.PasteboardType(UTType(mimeType: mime)?.identifier ?? mime)) }
-        board.clearContents(); board.writeObjects([item]); json([:])
+        board.clearContents(); board.writeObjects([item]); json(["changeCount": board.changeCount])
     case "keychainGet", "keychainSet", "keychainDelete":
         let account = try required(input, "account"), service = input["service"] as? String ?? "SlideSCI.AI"
         var query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
@@ -163,7 +182,16 @@ do {
     case "watch":
         let hosts = supportedHosts
         var counts: [String: Int] = [:]
-        func capture(_ pb: NSPasteboard, _ reason: String) { guard let host = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, hosts.contains(host), counts[pb.name.rawValue] != pb.changeCount, ignoredPasteboardCounts[pb.name.rawValue] != pb.changeCount else { return }; counts[pb.name.rawValue] = pb.changeCount; ignoredPasteboardCounts.removeValue(forKey: pb.name.rawValue); let entries = files(pb).filter { entry in guard let path = entry["path"] as? String else { return false }; return mediaExtensions.contains(URL(fileURLWithPath: path).pathExtension.lowercased()) }; if !entries.isEmpty { json(["type": "mediaSource", "reason": reason, "files": entries, "changeCount": pb.changeCount, "host": host, "timestamp": Date().timeIntervalSince1970 * 1000]) }; if let data = pb.data(forType: .tiff), entries.isEmpty { json(["type": "clipboardImage", "reason": reason, "data": data.base64EncodedString(), "mime": "image/tiff", "host": host, "timestamp": Date().timeIntervalSince1970 * 1000]) } }
+        func capture(_ pb: NSPasteboard, _ reason: String) {
+            guard let host = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, hosts.contains(host), counts[pb.name.rawValue] != pb.changeCount, ignoredPasteboardCounts[pb.name.rawValue] != pb.changeCount else { return }
+            let count = pb.changeCount
+            counts[pb.name.rawValue] = count; ignoredPasteboardCounts.removeValue(forKey: pb.name.rawValue)
+            let entries = files(pb).filter { entry in guard let path = entry["path"] as? String else { return false }; return mediaExtensions.contains(URL(fileURLWithPath: path).pathExtension.lowercased()) }
+            if !entries.isEmpty { json(["type": "mediaSource", "reason": reason, "files": entries, "changeCount": count, "pasteboard": pb.name.rawValue, "host": host, "timestamp": Date().timeIntervalSince1970 * 1000]) }
+            if entries.isEmpty, !isHostInternalPasteboard(pb), let data = pb.data(forType: .tiff), needsClipboardTIFF(data) {
+                json(["type": "clipboardImage", "reason": reason, "data": data.base64EncodedString(), "mime": "image/tiff", "changeCount": count, "pasteboard": pb.name.rawValue, "host": host, "timestamp": Date().timeIntervalSince1970 * 1000])
+            }
+        }
         if input["interceptTIFF"] as? Bool == true {
             guard AXIsProcessTrusted() else { fail("TIFF paste/drop interception requires Accessibility access for the native helper. Enable it explicitly in System Settings; SlideSCI never requests it automatically.") }
             let mask = (CGEventMask(1) << CGEventType.keyDown.rawValue) | (CGEventMask(1) << CGEventType.leftMouseUp.rawValue)

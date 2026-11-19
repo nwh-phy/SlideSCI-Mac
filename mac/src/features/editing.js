@@ -310,15 +310,16 @@ const definitions = [
     return apply(ctx, scale(shapes, values.percent));
   }, '以选择区域左上角为基准，同时缩放对象位置、宽高和各级组内文字字号。'),
   makeAction('selectAllText', '全选文本框', [], async ctx => {
-    const snapshot = await ctx.host.context({ scope: 'slide' });
-    const ids = snapshot.shapes.filter(shape => shape.type === 'text' || (shape.type === 'placeholder' && shape.text !== undefined) || (shape.isPlaceholder && shape.text !== undefined)).map(shape => shape.id);
+    const snapshot = await ctx.host.context({ scope: 'slide', geometry: true, textMeta: true });
+    const ids = snapshot.shapes.filter(shape => shape.type === 'text' || shape.hasTextFrame || (shape.type === 'placeholder' && shape.text !== undefined) || (shape.isPlaceholder && shape.text !== undefined)).map(shape => shape.id);
     if (!ids.length) throw new Error('当前幻灯片没有文本框。');
     return apply(ctx, [{ op: 'select', ids }]);
   }),
 ];
 
 async function addTitles(ctx, values, below) {
-  const { snapshot, shapes } = await selection(ctx);
+  const snapshot = await ctx.host.context({ scope: 'slide', geometry: true });
+  const shapes = selected(snapshot, 1);
   const fontSize = number(values.fontSize, '字号', { min: 0.01 });
   const distance = number(values.distance, '标题距离');
   if (!String(values.fontName).trim()) throw new Error('请输入标题字体名称。');
@@ -348,7 +349,7 @@ async function addTitles(ctx, values, below) {
     return apply(ctx, [{ op: 'select', ids: resultIds }]);
   } catch (error) {
     // A grouped original must remain intact if a later insertion fails.
-    const live = await ctx.host.context({ scope: 'slide' });
+    const live = await ctx.host.context({ scope: 'slide', geometry: true });
     return rollback(ctx, created.filter(id => live.shapes.some(shape => String(shape.id) === String(id))), error);
   }
 }
@@ -357,7 +358,8 @@ definitions.push(
   makeAction('addTitlesBelow', '添加下标题', titleFields, (ctx, values) => addTitles(ctx, values, true)),
   makeAction('addTitlesAbove', '添加上标题', titleFields, (ctx, values) => addTitles(ctx, values, false)),
   makeAction('addLabels', '添加图片标签', labelFields, async (ctx, values) => {
-    const { snapshot, shapes } = await selection(ctx);
+    const snapshot = await ctx.host.context({ scope: 'slide', geometry: true });
+    const shapes = selected(snapshot, 1);
     const fontSize = number(values.fontSize, '标签字号', { min: 0.01 });
     const start = number(values.startIndex, '起始编号', { min: 1, max: Number.MAX_SAFE_INTEGER - shapes.length, integer: true });
     const offsetX = number(values.offsetX, 'X 偏移');
@@ -376,7 +378,7 @@ definitions.push(
     return { message: `已添加 ${ids.length} 个标签。` };
   }),
   makeAction('updateLabels', '更新图片标签', labelFields, async (ctx, values) => {
-    const { shapes } = await selection(ctx);
+    const { shapes } = await selection(ctx, 1, true);
     const targets = ordered(shapes.filter(shape => shape.type === 'text'), 'position');
     if (!targets.length) throw new Error('请选择要更新标签的文本框。');
     const fontSize = number(values.fontSize, '标签字号', { min: 0.01 });

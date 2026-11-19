@@ -131,8 +131,35 @@ export const panels = [{ id: 'export.options', label: '导出与设置', section
     button('选择文件夹并导出', async () => { const result = await exportSlides(ctx, { range: range.control.value, pages: pages.control.value, format: format.control.value, dpi: Number(dpi.control.value), filename: filename.control.value, separatePdf: separate.control.checked, openFolder: open.control.checked }); if (result) status.textContent = `已导出至${result.folder}`; }, ctx, signal),
     button('保存默认设置', async () => { const value = Number(dpi.control.value); if (!Number.isFinite(value) || value < 36 || value > 2400) throw new Error('DPI必须介于36与2400之间。'); for (const [key, setting] of Object.entries({ format: format.control.value, dpi: value, separatePdf: separate.control.checked, openFolder: open.control.checked })) await ctx.settings.set(`export.${key}`, setting); status.textContent = '默认设置已保存。'; }, ctx, signal), status
   );
-  const about = await ctx.services.request('library/info', {});
-  root.append(element('p', `SlideSCI Mac ${about.version} · Windows原版 ${about.upstreamVersion}`), element('p', maintainer));
+  const about = await ctx.services.request('library/info', {}).catch(() => null);
+  if (about?.version) root.append(element('p', `SlideSCI Mac ${about.version} · Windows原版 ${about.upstreamVersion}`));
+  root.append(element('p', maintainer));
   for (const [name, url] of Object.entries(links)) root.append(button(linkLabels[name], () => ctx.services.openExternal(url), ctx, signal));
   container.append(root); return () => { lifetime.abort(); root.remove(); };
+} }, { id: 'export.preferences', label: '偏好设置与帮助', section: '设置与帮助', mount: async (container, ctx) => {
+  const lifetime = new AbortController(); const { signal } = lifetime;
+  const root = element('section', undefined, { className: 'export-settings' });
+  root.append(element('h3', '后台监听与运行方式'));
+  const tracking = input('自动追踪从 Finder 复制粘贴/拖入的图片（剪贴板监听）', 'checkbox');
+  tracking.control.checked = Boolean(await ctx.settings.get('background.autoPasteTracking', false));
+  const hint = element('p', '默认关闭：避免后台监听干扰系统粘贴，也不产生后台轮询。需要记录原图路径或导入 16 位 TIFF 时，直接使用「图片 → 插入图片并记录来源 / 粘贴图片文件」即可。');
+  const status = statusNode();
+  tracking.control.addEventListener('change', async () => {
+    const enabled = tracking.control.checked;
+    try {
+      await ctx.settings.set('background.autoPasteTracking', enabled);
+      globalThis.dispatchEvent?.(new CustomEvent('slidesci:tracking-toggle', { detail: { enabled } }));
+      status.textContent = enabled ? '已开启自动粘贴监听。' : '已关闭自动粘贴监听。';
+    } catch (error) {
+      tracking.control.checked = !enabled;
+      status.textContent = '无法保存设置：' + error.message;
+    }
+  }, { signal });
+  root.append(tracking.wrapper, hint, status);
+  const about = await ctx.services.request('library/info', {}).catch(() => null);
+  if (about?.version) root.append(element('p', `SlideSCI Mac ${about.version} · Windows原版 ${about.upstreamVersion}`));
+  root.append(element('p', maintainer));
+  for (const [name, url] of Object.entries(links)) root.append(button(linkLabels[name], () => ctx.services.openExternal(url), ctx, signal));
+  container.append(root);
+  return () => { lifetime.abort(); root.remove(); };
 } }];
