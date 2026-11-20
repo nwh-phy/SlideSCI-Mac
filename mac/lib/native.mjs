@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
-import { access, chmod, mkdir, readFile, realpath, stat, writeFile, rename, rm } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readFile, realpath, stat, writeFile, rename, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
+import { safeFilename } from './storage.mjs';
 
 const helperSource = fileURLToPath(new URL('../native/SlideSCI.swift', import.meta.url));
 const issuedFiles = new Set();
@@ -76,6 +77,14 @@ function hostContainer(host = 'powerpoint') {
   const id = host === 'wps' ? 'com.kingsoft.wpsoffice.mac' : host === 'powerpoint' ? 'com.microsoft.Powerpoint' : null;
   if (!id) throw new Error('Unknown presentation host.');
   return path.join(homedir(), 'Library', 'Containers', id, 'Data', 'tmp', 'SlideSCI-Mac');
+}
+const wpsPptxName = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.pptx$/;
+function wpsPptxReservations() {
+  return path.join(homedir(), 'Library', 'Application Support', 'SlideSCI Mac', 'wps-pptx-reservations');
+}
+async function lstatIfPresent(filename) {
+  try { return await lstat(filename); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
 const extensions = {
   'image/png': '.png', 'image/jpeg': '.jpg', 'image/tiff': '.tiff', 'image/bmp': '.bmp', 'image/gif': '.gif',
@@ -473,11 +482,34 @@ async function insertFragment(input, env) {
   // Capture geometry before PowerPoint applies its duplicate-paste offset.
   const sourceGeometry = bounds ? 'set sourceLeft to left position of sourceShape\nset sourceTop to top of sourceShape\nset sourceWidth to width of sourceShape\nset sourceHeight to height of sourceShape' : '';
   const transform = bounds ? `set lock aspect ratio of insertedShape to false\nset width of insertedShape to sourceWidth * ${sx}\nset height of insertedShape to sourceHeight * ${sy}\nset left position of insertedShape to ${number(left)} + (sourceLeft - ${number(bounds.left)}) * ${sx}\nset top of insertedShape to ${number(top)} + (sourceTop - ${number(bounds.top)}) * ${sy}` : '';
+  const targetId = input.slideId === undefined ? 'slide ID of targetSlide' : index(input.slideId);
+  let documentPath;
+  if (input.documentUrl?.startsWith('file://')) documentPath = fileURLToPath(input.documentUrl);
+  else if (input.documentUrl?.startsWith('/')) documentPath = input.documentUrl;
+  let documentGuard = '';
+  if (documentPath) {
+    const canonical = await realpath(documentPath).catch(() => documentPath);
+    const aliases = [...new Set([documentPath, canonical, canonical.replace(/^\/private(?=\/(?:var|tmp|etc)\/)/, '')])];
+    documentGuard = `if (full name of targetPresentation) is not in {${aliases.map(asText).join(', ')}} then error "请返回开始转换时的演示文稿。" number 1\n`;
+  }
+  const resolveSlide = `set targetPresentation to active presentation
+if (full name of targetPresentation) is not targetFullName then error "开始操作时的演示文稿已变化。" number 1
+set targetSlideNumber to 0
+repeat with candidateNumber from 1 to count of slides of targetPresentation
+if (slide ID of slide candidateNumber of targetPresentation) is targetSlideID then
+set targetSlideNumber to candidateNumber as integer
+exit repeat
+end if
+end repeat
+if targetSlideNumber is 0 then error "找不到开始操作时的幻灯片。" number 1
+set targetSlide to slide targetSlideNumber of targetPresentation`;
+  const paste = `go to slide (view of active window) number targetSlideNumber\nif (slide ID of slide of view of active window) is not targetSlideID then error "开始操作时的幻灯片已变化。" number 1\npaste object (view of active window)`;
+  const finish = `${resolveSlide}\non error errorText number errorNumber\nif sourcePresentation is not missing value then close sourcePresentation saving no\nerror errorText number errorNumber\nend try\nreturn ((count of shapes of targetSlide) - originalCount)`;
   return preservingClipboard(async () => {
     // Copying from another presentation requires closing it before pasting: while the source is open,
     // PowerPoint keeps it as the active presentation even after its window is brought forward, so the
     // target slide cannot be addressed. The clipboard survives closing the source.
-    const body = `set sourcePresentation to missing value\nset targetName to name of targetPresentation\nset targetSlideNumber to slide index of targetSlide\nset originalCount to count of shapes of targetSlide\nset sourceCount to 0\ntry\n${openFile(filename)}\nset sourcePresentation to active presentation\nset sourceCount to count of shapes of slide 1 of sourcePresentation\nclose sourcePresentation saving no\nset sourcePresentation to missing value\n${waitForPresentation('targetName')}\nrepeat with shapeNumber from 1 to sourceCount\n${openFile(filename)}\nset sourcePresentation to active presentation\nset sourceShape to shape shapeNumber of slide 1 of sourcePresentation\n${sourceGeometry}\ncopy shape sourceShape\nclose sourcePresentation saving no\nset sourcePresentation to missing value\n${waitForPresentation('targetName')}\ngo to slide (view of active window) number targetSlideNumber\npaste object (view of active window)\nset insertedShape to last shape of slide targetSlideNumber of presentation targetName\n${transform}\nend repeat\nset targetPresentation to presentation targetName\nset targetSlide to slide targetSlideNumber of targetPresentation\non error errorText number errorNumber\nif sourcePresentation is not missing value then close sourcePresentation saving no\nset targetPresentation to presentation targetName\nset targetSlide to slide targetSlideNumber of targetPresentation\nerror errorText number errorNumber\nend try\nreturn ((count of shapes of targetSlide) - originalCount)`;
+    const body = `${documentGuard}set sourcePresentation to missing value\nset targetName to name of targetPresentation\nset targetFullName to full name of targetPresentation\nset targetSlideID to ${targetId}\n${resolveSlide}\nset originalCount to count of shapes of targetSlide\ntry\n${openFile(filename)}\nset sourcePresentation to active presentation\nset sourceCount to count of shapes of slide 1 of sourcePresentation\nclose sourcePresentation saving no\nset sourcePresentation to missing value\n${waitForPresentation('targetName')}\nrepeat with shapeNumber from 1 to sourceCount\n${openFile(filename)}\nset sourcePresentation to active presentation\nset sourceShape to shape shapeNumber of slide 1 of sourcePresentation\n${sourceGeometry}\ncopy shape sourceShape\nclose sourcePresentation saving no\nset sourcePresentation to missing value\n${waitForPresentation('targetName')}\n${resolveSlide}\n${paste}\nset insertedShape to last shape of targetSlide\n${transform}\nend repeat\n${finish}`;
     const count = Number(await appleScript(office(body, input.presentationName))); env.events?.emit?.('changed', { host: 'powerpoint' }); return { inserted: count };
   });
 }
@@ -565,6 +597,10 @@ async function fragment(input, env = {}) {
   return { pptx: result.data, path: filename, shapeIds: refs.map(({ id }) => id), preview: preview.data, bounds };
 }
 function boundsFromContext(context, ids) { const selected = new Set(ids), shapes = []; const visit = (list) => { for (const shape of list || []) { if (selected.has(shape.id)) shapes.push(shape); if (shape.children) visit(shape.children); } }; visit(context?.shapes); if (!shapes.length) return undefined; const left = Math.min(...shapes.map((s) => s.left)), top = Math.min(...shapes.map((s) => s.top)); return { left, top, width: Math.max(...shapes.map((s) => s.left + s.width)) - left, height: Math.max(...shapes.map((s) => s.top + s.height)) - top }; }
+function pageExportStem(filename, format) {
+  const name = safeFilename(filename, 'slides'), extension = `.${format}`;
+  return name.toLowerCase().endsWith(extension) ? safeFilename(name.slice(0, -extension.length), 'slides') : name;
+}
 async function exportPresentationFiles(input, env, scratch) {
   const format = input.format || 'png';
   if (input.kind === 'original-images') {
@@ -612,12 +648,19 @@ async function exportPresentationFiles(input, env, scratch) {
       }
       return files;
     }
-    return [{ ...await descriptor(filename, 'application/pdf'), name: input.filename || 'slides.pdf' }];
+    const name = input.kind === 'selection' ? input.filename || 'slides.pdf' : `${pageExportStem(input.filename, 'pdf')}.pdf`;
+    return [{ ...await descriptor(filename, 'application/pdf'), name }];
   }
   if (!['png', 'jpg', 'bmp'].includes(format)) throw new Error(`Unknown export format: ${format}`);
   const pages = await helper('rasterPDF', { path: filename, dpi: input.dpi || 300, format, bounds: selectionBounds });
+  const stem = input.kind !== 'selection' && input.filename ? pageExportStem(input.filename, format) : undefined;
+  const selectionName = input.kind === 'selection' && input.filename && pages.length === 1 ? safeName(input.filename) : undefined;
   const result = [];
-  for (const [i, page] of pages.entries()) { const name = input.filename && pages.length === 1 ? safeName(input.filename) : `slide-${(input.indices?.[i] ?? i) + 1}.${format}`; const materialized = await materialize({ ...page, name }); result.push({ ...page, ...materialized, name }); }
+  for (const [i, page] of pages.entries()) {
+    const pageNumber = (input.indices?.[i] ?? i) + 1;
+    const name = selectionName || (stem ? `${stem}${pages.length > 1 ? `-${pageNumber}` : ''}.${format}` : `slide-${pageNumber}.${format}`);
+    result.push({ ...page, ...await materialize({ ...page, name }) });
+  }
   return result;
 }
 // Intermediate copies (packaged deck, rendered PDF, captured fragment) are removed as soon as
@@ -645,20 +688,45 @@ async function nativeOSAction(input, env) {
     case 'temporaryPath': {
       const extension = String(input.extension || 'bin').replace(/^\./, '');
       if (!/^[a-zA-Z0-9]{1,12}$/.test(extension)) throw new Error('Invalid temporary file extension.');
-      const filename = await temporaryPath(extension, input.host || 'powerpoint'); reservedFiles.add(path.resolve(filename)); return { path: filename };
+      const host = input.host || 'powerpoint';
+      const durable = host === 'wps' && extension.toLowerCase() === 'pptx';
+      const filename = await temporaryPath(durable ? 'pptx' : extension, host);
+      if (durable) {
+        const directory = wpsPptxReservations();
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        if (!(await lstat(directory)).isDirectory()) throw new Error('Invalid WPS PPTX reservation directory.');
+        await writeFile(path.join(directory, path.basename(filename)), '', { flag: 'wx', mode: 0o600 });
+      }
+      reservedFiles.add(path.resolve(filename));
+      return { path: filename };
     }
     case 'releaseFiles': {
-      // Compare both the spelled and the symlink-resolved forms: issued files are recorded by
-      // realpath, reserved ones by their spelled path, and a home folder may sit behind a symlink.
-      const spelled = path.resolve(hostContainer(input.host || 'powerpoint'));
+      const host = input.host || 'powerpoint';
+      const spelled = path.resolve(hostContainer(host));
       const cache = await realpath(spelled).catch(() => spelled);
       for (const filename of input.paths || []) {
-        if (typeof filename !== 'string' || !path.isAbsolute(filename)) throw new Error('Only issued files in the host cache may be released.');
-        const plain = path.resolve(filename), actual = await realpath(plain).catch(() => plain);
-        const inside = [plain, actual].some(value => value.startsWith(cache + path.sep) || value.startsWith(spelled + path.sep));
-        const owned = [plain, actual].some(value => reservedFiles.has(value) || issuedFiles.has(value));
-        if (!inside || !owned) throw new Error('Only issued files in the host cache may be released.');
-        await rm(actual, { recursive: true, force: true });
+        const denied = () => new Error('Only issued files in the host cache may be released.');
+        if (typeof filename !== 'string' || !path.isAbsolute(filename)) throw denied();
+        const plain = path.resolve(filename), name = path.basename(plain);
+        let actual, marker;
+        if (host === 'wps' && wpsPptxName.test(name)) {
+          if (path.dirname(plain) !== spelled) throw denied();
+          const directory = wpsPptxReservations();
+          marker = path.join(directory, name);
+          if (!(await lstatIfPresent(directory))?.isDirectory() || !(await lstatIfPresent(marker))?.isFile()) throw denied();
+          actual = path.join(cache, name);
+          // A failed WPS export may never have created the file. Reject symlinks, even broken ones.
+          const file = await lstatIfPresent(plain);
+          if (file && (!file.isFile() || await realpath(plain) !== actual)) throw denied();
+        } else {
+          actual = await realpath(plain).catch(() => plain);
+          const inside = actual.startsWith(cache + path.sep) || (actual === plain && plain.startsWith(spelled + path.sep));
+          const owned = [plain, actual].some(value => reservedFiles.has(value) || issuedFiles.has(value));
+          const durable = host === 'wps' && path.dirname(actual) === cache && wpsPptxName.test(path.basename(actual));
+          if (!inside || !owned || durable) throw denied();
+        }
+        await rm(actual, { recursive: !marker, force: true });
+        if (marker) await rm(marker, { force: true });
         for (const value of [plain, actual]) { reservedFiles.delete(value); issuedFiles.delete(value); }
       }
       return {};

@@ -5,8 +5,35 @@ import {
 
 const geometryKeys = new Set(['left', 'top', 'width', 'height', 'rotation']);
 const needsRichScale = shapes => flatten(shapes).some(shape => !['picture', 'media'].includes(shape.type));
+const richTextKeys = ['font', 'runs', 'paragraphs'];
+// Keep selection-time geometry; only borrow rich text data so scaling never compounds
+// geometry that earlier spacing edits already moved.
+function mergeRichShape(baseline, rich) {
+  if (!rich) return baseline;
+  const merged = { ...baseline };
+  for (const key of richTextKeys) if (rich[key] !== undefined) merged[key] = structuredClone(rich[key]);
+  if (baseline.children?.length) {
+    const richById = new Map(flatten(rich.children || []).map(shape => [String(shape.id), shape]));
+    merged.children = baseline.children.map(child => mergeRichShape(child, richById.get(String(child.id))));
+  }
+  return merged;
+}
+const selectionKey = list => [...(list || [])].map(String).sort().join('\u0000');
+function sameSurface(baseline, rich) {
+  return Boolean(rich) && baseline.presentationId === rich.presentationId && baseline.slideId === rich.slideId
+    && selectionKey(baseline.selectionIds) === selectionKey(rich.selectionIds);
+}
+async function richBaseline(ctx, baseline) {
+  const rich = await ctx.host.context({ scope: 'selection' });
+  if (!sameSurface(baseline, rich)) throw new Error('选择或页面已变化，请重新读取选择后再调整。');
+  const byId = new Map(flatten(rich.shapes || []).map(shape => [String(shape.id), shape]));
+  return { ...structuredClone(baseline), shapes: baseline.shapes.map(shape => mergeRichShape(shape, byId.get(String(shape.id)))) };
+}
 const section = '排版与编辑';
 const session = new WeakMap();
+const TITLE_BATCH_TAG = 'SLIDESCI_TITLE_BATCH';
+const TITLE_OWNER_TAG = 'SLIDESCI_TITLE_OWNER';
+let titleBatchSequence = 0;
 const selectField = (name, label, options, value) => ({ name, label, type: 'select', options: options.map(([value, label]) => ({ value, label })), default: value });
 const numericField = (name, label, value, min, max, step = 1) => ({ name, label, type: 'number', default: value, min, max, step });
 const checkField = (name, label, value) => ({ name, label, type: 'checkbox', default: value });
@@ -320,13 +347,54 @@ const definitions = [
   }),
 ];
 
+function titleBatchMarker() {
+  titleBatchSequence += 1;
+  return `${Date.now().toString(36)}-${titleBatchSequence}-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
+}
+
+const tagValue = value => String(value ?? '').toUpperCase();
+function ownedTitles(context, marker) {
+  return flatten(context?.shapes || []).filter(shape => tagValue(shape.tags?.[TITLE_BATCH_TAG]) === marker);
+}
+
+// Only top-level groups are ours: a title cannot enter a preexisting group unless this
+// action created that group, so preexisting groups are never ungrouped. WPS may create a
+// group before its name/tags are written, so membership in this run's tagged titles counts too.
+function ownedGroups(context, marker, before) {
+  return context.shapes.filter(shape => !before.has(String(shape.id)) && shape.type === 'group'
+    && (tagValue(shape.tags?.[TITLE_BATCH_TAG]) === marker
+      || shape.children?.some(child => tagValue(child.tags?.[TITLE_BATCH_TAG]) === marker)))
+    .map(shape => String(shape.id));
+}
+
+async function rollbackTitles(ctx, marker, before, target, originalError) {
+  try {
+    let current = await ctx.host.context({ scope: 'slide', geometry: true, tags: true, target });
+    const groups = ownedGroups(current, marker, before);
+    if (groups.length) {
+      // Undo the groups this action created; originals are restored, never deleted.
+      await ctx.host.apply(groups.map(id => ({ op: 'ungroup', id })), { readback: false, target });
+      // Ungrouping may recreate child IDs, so find the titles again by tag instead of by ID.
+      current = await ctx.host.context({ scope: 'slide', geometry: true, tags: true, target });
+    }
+    const ids = ownedTitles(current, marker).map(shape => String(shape.id));
+    if (ids.length) await ctx.host.apply([{ op: 'delete', ids }], { readback: false, target });
+  } catch (cleanupError) {
+    throw new AggregateError([originalError, cleanupError], `${originalError.message}；无法撤销本次新增标题：${cleanupError.message}`);
+  }
+  throw originalError;
+}
+
 async function addTitles(ctx, values, below) {
   const snapshot = await ctx.host.context({ scope: 'slide', geometry: true });
+  const target = { presentationId: snapshot.presentationId, slideId: snapshot.slideId };
   const shapes = selected(snapshot, 1);
   const fontSize = number(values.fontSize, '字号', { min: 0.01 });
   const distance = number(values.distance, '标题距离');
   if (!String(values.fontName).trim()) throw new Error('请输入标题字体名称。');
-  const created = [];
+  const marker = titleBatchMarker();
+  const owner = shape => `${marker}|${tagValue(shape.id)}`;
+  const before = new Set(flatten(snapshot.shapes || []).map(shape => String(shape.id)));
   try {
     const insertCommands = shapes.map(shape => {
       const top = below ? shape.top + shape.height + distance : shape.top - fontSize * 2 - distance;
@@ -334,27 +402,35 @@ async function addTitles(ctx, values, below) {
         op: 'insertText', text: String(values.text), left: shape.left, top, width: shape.width, height: fontSize * 2,
         font: { name: values.fontName.trim(), nameFarEast: values.fontName.trim(), size: fontSize },
         paragraphs: [{ runs: [{ text: String(values.text) }], alignment: values.center ? 'center' : 'left' }],
-        textFrame: { wordWrap: true, autoSize: 'shapeToFitText' }, name: `${shape.name} 标题`
+        textFrame: { wordWrap: true, autoSize: 'shapeToFitText' }, name: `${shape.name} 标题`,
+        tags: { [TITLE_BATCH_TAG]: marker, [TITLE_OWNER_TAG]: owner(shape) }
       };
     });
-    const next = await apply(ctx, insertCommands);
-    const inserted = newShapes(snapshot, next);
-    created.push(...inserted.map(item => item.id));
+    // Insert without a rich readback; WPS would otherwise export the whole deck here.
+    await ctx.host.apply(insertCommands, { readback: false, target });
+    // Pair each new title with the object it belongs to by tag; readback order is not selection order.
+    const tagged = await ctx.host.context({ scope: 'slide', geometry: true, tags: true, target });
+    const inserted = ownedTitles(tagged, marker);
     if (inserted.length !== shapes.length) throw new Error('标题插入后未找到新增文本框。');
+    const byOwner = new Map(inserted.map(item => [tagValue(item.tags?.[TITLE_OWNER_TAG]), item]));
+    const pairs = shapes.map(shape => [shape, byOwner.get(owner(shape))]);
+    if (pairs.some(([, title]) => !title)) throw new Error('标题插入后未能按对象匹配新增文本框。');
     if (!values.autoGroup) {
-      return apply(ctx, [{ op: 'select', ids: inserted.map(item => item.id) }]);
+      return await ctx.host.apply([{ op: 'select', ids: inserted.map(item => item.id) }], { target, readback: false });
     }
-    const groupCommands = shapes.map((shape, index) => ({
-      op: 'group', ids: [shape.id, inserted[index].id], name: `${shape.name} 与标题`
+    const groupCommands = pairs.map(([shape, title]) => ({
+      op: 'group', ids: [shape.id, title.id], name: `${shape.name} 与标题`,
+      tags: { [TITLE_BATCH_TAG]: marker, [TITLE_OWNER_TAG]: owner(shape) }
     }));
-    const grouped = await apply(ctx, groupCommands);
-    const groups = newShapes(next, grouped);
+    await ctx.host.apply(groupCommands, { readback: false, target });
+    const grouped = await ctx.host.context({ scope: 'slide', geometry: true, tags: true, target });
+    const groups = grouped.shapes.filter(shape => shape.type === 'group' && tagValue(shape.tags?.[TITLE_BATCH_TAG]) === marker);
     if (groups.length !== shapes.length) throw new Error('编组后未返回新增组。');
-    return apply(ctx, [{ op: 'select', ids: groups.map(item => item.id) }]);
+    return await ctx.host.apply([{ op: 'select', ids: groups.map(item => item.id) }], { target, readback: false });
   } catch (error) {
-    // A grouped original must remain intact if a later insertion fails.
-    const live = await ctx.host.context({ scope: 'slide', geometry: true });
-    return rollback(ctx, created.filter(id => live.shapes.some(shape => String(shape.id) === String(id))), error);
+    // Titles and groups are owned by this run's tag, so a partially applied batch is undoable
+    // without touching originals, preexisting groups, or unrelated shapes.
+    return rollbackTitles(ctx, marker, before, target, error);
   }
 }
 
@@ -431,12 +507,12 @@ export const panels = [{
   id: 'editing.controls', label: '编辑设置与实时调整', section,
   async mount(container, ctx) {
     let disposed = false;
-    let applying = false;
     let liveSnapshot;
     let liveRich = false;
     let signature = '';
     let activeOperation = Promise.resolve();
     let changePending = false;
+    let selectionDirty = false;
     const pendingInputs = new Map();
     let liveScheduled = false;
     const chooser = element('select');
@@ -504,16 +580,22 @@ export const panels = [{
       if (liveScheduled || disposed) return;
       liveScheduled = true;
       activeOperation = activeOperation.then(async () => {
-        applying = true;
+        const updateSelection = async () => {
+          while (!disposed && selectionDirty) {
+            selectionDirty = false;
+            await refreshSelection();
+          }
+        };
         try {
           while (!disposed && pendingInputs.size) {
+            await updateSelection();
+            if (disposed) return;
             const [name, value] = pendingInputs.entries().next().value;
             pendingInputs.delete(name);
             if (!liveSnapshot) await capture();
             if (name === 'scale' && !liveRich && needsRichScale(selected(liveSnapshot, 1))) {
-              const richSnapshot = await ctx.host.context({ scope: 'selection' });
+              liveSnapshot = await richBaseline(ctx, liveSnapshot);
               if (disposed) return;
-              liveSnapshot = structuredClone(richSnapshot);
               liveRich = true;
             }
             const shapes = selected(liveSnapshot, name === 'scale' ? 1 : 2);
@@ -522,9 +604,9 @@ export const panels = [{
             await ctx.settings.set(`editing.live.${name}`, Number(value));
           }
           if (!disposed) await ctx.refresh();
+          await updateSelection();
         } catch (error) { pendingInputs.clear(); ctx.notify(error.message, 'error'); }
         finally {
-          applying = false;
           liveScheduled = false;
           if (!disposed && pendingInputs.size) scheduleLive();
         }
@@ -575,15 +657,23 @@ export const panels = [{
     reset.addEventListener('click', () => {
       activeOperation = activeOperation.then(capture).catch(error => ctx.notify(error.message, 'error'));
     });
+    async function refreshSelection() {
+      const snapshot = await ctx.host.summary({ slides: false });
+      if (disposed) return;
+      const next = JSON.stringify([snapshot.presentationId, snapshot.slideId, snapshot.selectionIds]);
+      if (next !== signature) await capture();
+    }
     const unsubscribe = ctx.host.onChanged(() => {
-      if (disposed || applying || changePending) return;
+      if (disposed) return;
+      selectionDirty = true;
+      if (liveScheduled || changePending) return;
       changePending = true;
       activeOperation = activeOperation.then(async () => {
         try {
-          if (disposed) return;
-          const snapshot = await ctx.host.summary({ slides: false });
-          const next = JSON.stringify([snapshot.presentationId, snapshot.slideId, snapshot.selectionIds]);
-          if (next !== signature) await capture();
+          while (!disposed && selectionDirty) {
+            selectionDirty = false;
+            await refreshSelection();
+          }
         } catch (error) { if (!disposed) ctx.notify(error.message, 'error'); }
         finally { changePending = false; }
       });

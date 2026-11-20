@@ -306,7 +306,19 @@ export function connectWps(services = {}) {
     if (!slide) throw new Error('当前演示文稿没有幻灯片。');
     return { presentation, window, slide, slideIndex: Number(slide.SlideIndex) - 1 };
   }
-  function presentationKey(presentation) { return String(optional(() => presentation.Name) || 'WPS'); }
+  function presentationKey(presentation) { return String(optional(() => presentation.FullName) || optional(() => presentation.Name) || 'WPS'); }
+  function slideId(slide) { return String(optional(() => slide.SlideID) || ''); }
+  function targetedData(target) {
+    const active = activeData();
+    if (!target) return active;
+    if (presentationKey(active.presentation) === String(target.presentationId) && target.slideId) {
+      if (slideId(active.slide) === String(target.slideId)) return active;
+      for (const slide of items(active.presentation.Slides)) {
+        if (slideId(slide) === String(target.slideId)) return { ...active, slide, slideIndex: Number(slide.SlideIndex) - 1 };
+      }
+    }
+    throw new Error('找不到操作开始时的演示文稿或幻灯片。');
+  }
   function slideAt(presentation, index) {
     const value = Number(index);
     if (!Number.isInteger(value) || value < 0 || value >= Number(presentation.Slides.Count)) throw new Error(`幻灯片索引无效：${index}`);
@@ -418,7 +430,7 @@ export function connectWps(services = {}) {
   // flatten/selected/bounds/alignment 现有的数学语义。ids 为空集合时只看选择，
   // 传 null 时返回整页几何。组内子形状返回的是原生坐标（可能位于组坐标系），
   // 只用于结构、选择与基线，不能当页面坐标做数学：选择范围遇到组内选中会回落到富上下文。
-  function geometryShapes(nodes, slideIndex, ids) {
+  function geometryShapes(nodes, slideIndex, ids, withTags) {
     const wanted = ids === null ? undefined : new Set((ids || []).map(String));
     if (wanted && !wanted.size) return [];
     const included = new Set();
@@ -438,6 +450,7 @@ export function connectWps(services = {}) {
     }
     const build = parentId => (byParent.get(parentId) || []).map(node => {
       const shape = geometryShape(node, slideIndex);
+      if (withTags) shape.tags = readTags(node.native);
       const children = build(node.id);
       if (children.length) shape.children = children;
       return shape;
@@ -449,7 +462,7 @@ export function connectWps(services = {}) {
   // 覆盖后的富模型（解析子坐标系）不一致，选择范围因此回落到富上下文，绝不把
   // 组坐标当作页面坐标参与对齐/排版数学。整页几何仅用于结构、选择与基线签名。
   function geometryContext(options = {}, extraIds = []) {
-    const active = activeData();
+    const active = targetedData(options.target);
     const selection = liveSelection(active.window);
     const selectionIds = selectionOrder(active, selection);
     const { width, height } = pageSize(active.presentation);
@@ -464,7 +477,7 @@ export function connectWps(services = {}) {
     return { presentationId: presentationKey(active.presentation), title: presentationTitle(active.presentation),
       slideId: String(optional(() => active.slide.SlideID) || active.slideIndex + 1), slideIndex: active.slideIndex,
       width, height, selectionIds, geometry: true,
-      shapes: ids === null || ids.length ? geometryShapes(nodes || geometryTree(active.slide), active.slideIndex, ids) : [],
+      shapes: ids === null || ids.length ? geometryShapes(nodes || geometryTree(active.slide), active.slideIndex, ids, options.tags === true) : [],
       selectedSlideIndices: selection.type === PP_SELECTION_SLIDES ? (selection.slideIndices || []) : [] };
   }
   // 组内选中的对齐沿用原有富坐标路径：以解析子坐标系坐标计算、原生写回，
@@ -708,7 +721,15 @@ export function connectWps(services = {}) {
     for (const key of ['rotation', 'name', 'alternativeText', 'tags', 'fill', 'line', 'textFrame', 'font', 'text', 'runs', 'paragraphs']) {
       if (command[key] !== undefined) metadata[key] = command[key];
     }
-    if (Object.keys(metadata).length) await applyProperties(shape, metadata);
+    try {
+      if (Object.keys(metadata).length) await applyProperties(shape, metadata);
+    } catch (error) {
+      try { shape.Delete(); }
+      catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], `${error.message}；无法撤销新建文本框：${cleanupError.message}`);
+      }
+      throw error;
+    }
     return shape;
   }
   async function insertShape(slide, command) {
@@ -1238,7 +1259,9 @@ export function connectWps(services = {}) {
         let rich = false, geometryUpdate = false;
         const movedIds = new Set();
         try {
-          const active = activeData();
+          const active = targetedData(options.target);
+          if (options.target && commands.some(command => ['insertText', 'group', 'select'].includes(command.op))
+            && slideId(activeData().slide) !== String(options.target.slideId)) throw new Error('请返回开始操作时的幻灯片。');
           const presentation = active.presentation;
           const remap = new Map();
           for (const command of commands) {
@@ -1411,7 +1434,7 @@ export function connectWps(services = {}) {
     async insertFragment(fragment, options = {}) {
       if (!fragment?.pptx) throw new Error('片段缺少可编辑的 PPTX 数据。');
       return tracked(async () => {
-        const active = activeData();
+        const active = targetedData(options.target);
         const destinationSlide = active.slide;
         const destinationWidth = Number(optional(() => active.presentation.PageSetup.SlideWidth)) || 0;
         const destinationHeight = Number(optional(() => active.presentation.PageSetup.SlideHeight)) || 0;
@@ -1465,8 +1488,11 @@ export function connectWps(services = {}) {
         try { await release([file.path]); } catch (error) { if (!failure) failure = error; }
         temporaryAssets.delete(file.path);
         if (!failure) {
-          try { context = await buildContext({ scope: 'slide' }); committed = true; }
-          catch (error) { failure = error; }
+          if (options.readback === false) committed = true;
+          else {
+            try { context = await buildContext({ scope: 'slide' }); committed = true; }
+            catch (error) { failure = error; }
+          }
         }
         if (failure && !committed && insertedIds.length) {
           try {

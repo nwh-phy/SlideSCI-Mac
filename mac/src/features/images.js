@@ -220,7 +220,9 @@ async function mergeChannels(ctx) {
   const images = await imagesFor(ctx, shapes), rendered = await ctx.services.request('images/merge', { images });
   let alternativeText = '合并通道（RGB 相加，超过 255 截断；不自动配准）：\n' + shapes.map(s => s.name).join('\n');
   if (calibration) alternativeText = writeRecord(alternativeText, FOV_PREFIX, calibration);
-  const id = uuid(), result = await ctx.host.apply([{ op: 'insertImage', ...rendered, left: Math.max(...shapes.map(s => s.left + s.width)) + 18, top: first.top, width: content(first).width, height: content(first).height, rotation: first.rotation || 0, name: `合并通道_${shapes.length}通道`, alternativeText, tags: { [UUID_TAG]: id, SLIDESCI_FOV_VISIBLE: '1' } }]);
+  // The merged raster is already cropped to each channel's visible area, so this FOV calibrates the
+  // whole new picture; a later native crop must still reduce it.
+  const id = uuid(), result = await ctx.host.apply([{ op: 'insertImage', ...rendered, left: Math.max(...shapes.map(s => s.left + s.width)) + 18, top: first.top, width: content(first).width, height: content(first).height, rotation: first.rotation || 0, name: `合并通道_${shapes.length}通道`, alternativeText, tags: { [UUID_TAG]: id } }]);
   const merged = result.shapes.find(s => tag(s, UUID_TAG) === id), scale = shapes.map(scaleOf).find(Boolean);
   if (merged && scale && calibration) { const { applyScaleBar } = await import('./science.js'); await applyScaleBar(ctx, merged, calibration, scale); }
   else if (merged) await ctx.host.apply([{ op: 'select', ids: [merged.id] }]);

@@ -4,7 +4,14 @@ import { connectPowerPoint } from '../src/powerpoint.js';
 
 const loadable = value => Object.assign(value, { load() { return this; } });
 function collection(items) {
-  return loadable({ items, getCount() { return { value: items.length }; }, getItemAt(index) { return items[index]; } });
+  return loadable({ items, getCount() { return { value: items.length }; }, getItemAt(index) { return items[index]; },
+    getItem(id) { return items.find(item => String(item.id) === String(id)); } });
+}
+function shapeTags() {
+  const tags = collection([]);
+  tags.add = (key, value) => { tags.delete(key); tags.items.push({ key, value }); };
+  tags.delete = key => { const index = tags.items.findIndex(item => item.key === key); if (index >= 0) tags.items.splice(index, 1); };
+  return tags;
 }
 
 // A text shape exposes textFrame.textRange.text; the watch must read that, not a TextRange.textFrame.
@@ -83,7 +90,7 @@ test('core figure labels, titles and selectAllText run in pure Office.js without
     const textRange = loadable({ text, font, paragraphFormat });
     const textFrame = loadable({ textRange, wordWrap: false, autoSizeSetting: 'AutoSizeNone', hasText: Boolean(text) });
     return loadable({ id, name, type, left, top, width, height, rotation: 0, zOrderPosition: 1, textFrame,
-      tags: { add() {}, delete() {} }, delete() { const i = shapes.findIndex(s => s.id === id); if (i >= 0) shapes.splice(i, 1); } });
+      tags: shapeTags(), delete() { const i = shapes.findIndex(s => s.id === id); if (i >= 0) shapes.splice(i, 1); } });
   };
   const shapes = [
     makeShape({ id: 'img-1', name: 'Fig1', type: 'Image', left: 20, top: 30, width: 120, height: 90 }),
@@ -142,6 +149,28 @@ test('core figure labels, titles and selectAllText run in pure Office.js without
   assert.equal(backendCalls, 0, 'zero backend or AppleScript calls for core figure composition');
 });
 
+test('PowerPoint rollback and text deletion stay on the captured slide after selection changes', async t => {
+  const originals = { Office: globalThis.Office, PowerPoint: globalThis.PowerPoint };
+  t.after(() => { for (const [name, value] of Object.entries(originals)) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; } });
+  const changes = [];
+  const slides = collection(['256', '257'].map(id => loadable({ id, shapes: collection([
+    loadable({ id: '4', type: 'Group', group: { shapes: collection([]), ungroup: () => changes.push(['ungroup', id]) } }),
+    loadable({ id: '5', type: 'TextBox', delete: () => changes.push(['delete', id]) })
+  ]) })));
+  const presentation = loadable({ id: 'deck', slides, getSelectedSlides: () => collection([slides.items[1]]) });
+  globalThis.Office = { HostType: { PowerPoint: 'PowerPoint' }, onReady: async () => ({ host: 'PowerPoint' }),
+    context: { document: { url: '/tmp/fixture.pptx' }, requirements: { isSetSupported: () => true } } };
+  globalThis.PowerPoint = { run: operation => operation({ presentation, sync: async () => {} }) };
+  const host = await connectPowerPoint({ request() { assert.fail('unexpected native call'); } });
+  t.after(() => host.dispose());
+  const options = { target: { presentationId: 'deck', slideId: '256' }, readback: false };
+  await host.apply([{ op: 'ungroup', id: '4' }], options);
+  await host.apply([{ op: 'delete', ids: ['5'] }], options);
+  await assert.rejects(host.apply([{ op: 'delete', ids: ['5'] }],
+    { ...options, target: { ...options.target, presentationId: 'another deck' } }), /找不到操作开始时/);
+  assert.deepEqual(changes, [['ungroup', '256'], ['delete', '256']]);
+});
+
 test('PowerPoint reads retry a transient GeneralException but give up on other errors', async t => {
   const original = globalThis.PowerPoint;
   t.after(() => { if (original === undefined) delete globalThis.PowerPoint; else globalThis.PowerPoint = original; });
@@ -176,8 +205,9 @@ test('powerpoint selection watch uses DocumentSelectionChanged without polling a
   const removedHandlers = [];
   const shapes = [loadable({ id: 'p1', name: 'Pic1', left: 10, top: 10, width: 100, height: 80, rotation: 0, type: 'Image', zOrderPosition: 1 })];
   const slides = collection([loadable({ id: 'slide1', index: 0, shapes: collection(shapes) })]);
+  let selection = [];
   const presentation = loadable({ id: 'deck', slides, pageSetup: loadable({ slideWidth: 720, slideHeight: 540 }),
-    getSelectedSlides() { return collection(slides.items); }, getSelectedShapes() { return collection([]); } });
+    getSelectedSlides() { return collection(slides.items); }, getSelectedShapes() { return collection(selection); } });
 
   globalThis.Office = {
     HostType: { PowerPoint: 'PowerPoint' },
@@ -219,7 +249,13 @@ test('powerpoint selection watch uses DocumentSelectionChanged without polling a
   assert.deepEqual(selectionChanges, ['selection'], 'DocumentSelectionChanged triggers immediate selection notification');
   assert.equal(powerPointRuns, 0, 'selection event does not run full surfaceFingerprint');
 
-  const unsubAll = host.onChanged(() => {}, { mode: 'all' });
+  const allChanges = [];
+  const unsubAll = host.onChanged(change => allChanges.push(change?.kind), { mode: 'all' });
+  selection = [shapes[0]];
+  addedHandlers[0]({});
+  await Promise.resolve();
+  assert.deepEqual(selectionChanges, ['selection', 'selection'], 'the first click with an all-mode listener reaches the pane before any fingerprint exists');
+  assert.deepEqual(allChanges, ['selection']);
   docMock.setVisibility('hidden');
   await new Promise(resolve => setTimeout(resolve, 1750));
   assert.equal(powerPointRuns, 0, 'background polling pauses when document is hidden');
@@ -251,8 +287,10 @@ test('addTitlesBelow batches text insertion and auto-grouping without per-shape 
     const textRange = loadable({ text, font, paragraphFormat });
     const textFrame = loadable({ textRange, wordWrap: false, autoSizeSetting: 'AutoSizeNone', hasText: Boolean(text) });
     return loadable({ id, name, type, left, top, width, height, rotation: 0, zOrderPosition: 1, textFrame, children,
-      ...(type === 'Group' ? { group: { shapes: collection(children) } } : {}),
-      tags: { add() {}, delete() {} }, delete() { const i = shapes.findIndex(s => s.id === id); if (i >= 0) shapes.splice(i, 1); } });
+      ...(type === 'Group' ? { group: { shapes: collection(children), ungroup() {
+        shapes.splice(shapes.findIndex(shape => shape.id === id), 1, ...children);
+      } } } : {}),
+      tags: shapeTags(), delete() { const i = shapes.findIndex(s => s.id === id); if (i >= 0) shapes.splice(i, 1); } });
   };
   const shapes = [1, 2, 3, 4].map(i => makeShape({ id: `img-${i}`, name: `Fig${i}`, type: 'Image', left: i * 100, top: 40, width: 80, height: 60 }));
   let selectedIds = shapes.map(s => s.id);
@@ -260,6 +298,7 @@ test('addTitlesBelow batches text insertion and auto-grouping without per-shape 
   const runLogs = [];
 
   const shapeCollection = Object.assign(collection(shapes), {
+    getItem(id) { return shapes.find(shape => shape.id === id); },
     addTextBox(text, options) {
       if (activeRunStats) activeRunStats.addedBoxes++;
       const box = makeShape({ id: `tb-${++nextId}`, name: 'TextBox', type: 'TextBox',
@@ -322,6 +361,15 @@ test('addTitlesBelow batches text insertion and auto-grouping without per-shape 
   assert.deepEqual(runLogs.filter(r => r.grouped > 0), [{ addedBoxes: 0, grouped: 4 }], 'autoGroup batches all 4 groupings in one PowerPoint.run');
   assert.equal(shapes.filter(s => s.type === 'Group').length, 4);
   assert.equal(selectedIds.length, 4);
+  const grouped = shapes.find(shape => shape.type === 'Group');
+  grouped.tags.add('CHECK_GROUP', '1');
+  grouped.children[1].tags.add('CHECK_CHILD', '1');
+  const tree = await host.context({ scope: 'slide', geometry: true, tags: true });
+  const matchedGroup = tree.shapes.find(shape => shape.id === grouped.id);
+  assert.equal(matchedGroup.tags.CHECK_GROUP, '1');
+  assert.equal(matchedGroup.children[1].tags.CHECK_CHILD, '1');
+  await host.apply(shapes.filter(shape => shape.type === 'Group').map(shape => ({ op: 'ungroup', id: shape.id })), { readback: false });
+  assert.deepEqual(shapes.filter(shape => shape.type === 'Image').map(shape => shape.id).sort(), ['img-1', 'img-2', 'img-3', 'img-4']);
   assert.equal(backendCalls, 0);
 });
 

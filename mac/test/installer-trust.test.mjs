@@ -147,10 +147,92 @@ const state = process.env.FAKE_LAUNCHCTL_STATE, args = process.argv.slice(2);
 fs.appendFileSync(path.join(state, 'calls.log'), args.join(' ') + '\\n');
 const loaded = path.join(state, 'loaded');
 if (args[0] === 'print') process.exit(fs.existsSync(loaded) ? 0 : 113);
-if (args[0] === 'bootstrap') { fs.writeFileSync(loaded, args.at(-1)); process.exit(0); }
-if (args[0] === 'bootout') { if (!fs.existsSync(loaded)) process.exit(3); fs.rmSync(loaded); process.exit(0); }
+if (args[0] === 'bootstrap') {
+  if (process.env.FAKE_LAUNCHCTL_FAIL_BOOTSTRAP) { console.error('Bootstrap failed: 5: Input/output error'); process.exit(5); }
+  if (process.env.FAKE_LAUNCHCTL_FAIL_VERSION) {
+    const application = path.join(state, '../Library/Application Support/SlideSCI-Mac');
+    if (require(path.join(application, 'BUILD-INFO.json')).version === process.env.FAKE_LAUNCHCTL_FAIL_VERSION) {
+      console.error('Bootstrap failed for the new version'); process.exit(5);
+    }
+  }
+  fs.writeFileSync(loaded, args.at(-1)); process.exit(0);
+}
+if (args[0] === 'bootout') {
+  if (process.env.FAKE_LAUNCHCTL_FAIL_BOOTOUT) { console.error('Boot-out failed: 5: Input/output error'); process.exit(5); }
+  if (!fs.existsSync(loaded)) process.exit(3);
+  fs.rmSync(loaded); process.exit(0);
+}
 process.exit(2);
 `;
+}
+
+const priorManifest = '<OfficeApp><Version>0.9.0.0</Version></OfficeApp>';
+const v1Manifest = '<OfficeApp><Version>1.1.2.0</Version></OfficeApp>';
+const v2Manifest = '<OfficeApp><Version>1.2.0.0</Version></OfficeApp>';
+
+async function upgradeEnvironment(prefix) {
+  const home = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const wefDir = path.join(home, 'Library/Containers/com.microsoft.Powerpoint/Data/Documents/wef');
+  const securityState = path.join(home, 'security');
+  const launchState = path.join(home, 'launchctl');
+  const fakeSecurityTool = path.join(home, 'fake-security');
+  const fakeLaunchctl = path.join(home, 'fake-launchctl');
+  const v1Pkg = path.join(home, 'pkg-v1');
+  const v2Pkg = path.join(home, 'pkg-v2');
+  for (const directory of [wefDir, securityState, launchState]) await mkdir(directory, { recursive: true });
+  await writeFile(path.join(wefDir, 'SlideSCI-Mac.xml'), priorManifest);
+  await writeFile(fakeSecurityTool, fakeSecurity);
+  await chmod(fakeSecurityTool, 0o755);
+  await writeFile(fakeLaunchctl, makeFakeLaunchctl());
+  await chmod(fakeLaunchctl, 0o755);
+  await makePackageFixture(v1Pkg, { version: '0.1.2', manifestXml: v1Manifest });
+  await makePackageFixture(v2Pkg, { version: '0.2.0', manifestXml: v2Manifest });
+  const env = {
+    ...process.env,
+    SLIDESCI_SECURITY_TOOL: fakeSecurityTool,
+    FAKE_SECURITY_STATE: securityState,
+    SLIDESCI_LAUNCHCTL: fakeLaunchctl,
+    FAKE_LAUNCHCTL_STATE: launchState,
+    SLIDESCI_RUNNING_HOSTS: ''
+  };
+  const runPkg = (pkg, command, extra = [], overrides = {}) => execFileSync(process.execPath, [path.join(pkg, 'mac/scripts/distribution.mjs'), command, '--profile', home, ...extra], {
+    env: { ...env, ...overrides }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+  });
+  const launchCalls = async () => (await readFile(path.join(launchState, 'calls.log'), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean);
+  const trusted = async () => (await readdir(securityState)).filter(name => name.startsWith('trusted-')).map(name => name.slice(8));
+  const installation = async () => JSON.parse(await readFile(path.join(home, 'Library/Application Support/SlideSCI-Mac-Installer/installation.json'), 'utf8'));
+  const manifest = () => readFile(path.join(wefDir, 'SlideSCI-Mac.xml'), 'utf8');
+  const buildVersion = async () => JSON.parse(await readFile(path.join(home, 'Library/Application Support/SlideSCI-Mac/BUILD-INFO.json'), 'utf8')).version;
+  return { home, wefDir, launchState, v1Pkg, v2Pkg, runPkg, launchCalls, trusted, installation, manifest, buildVersion };
+}
+
+// Builds a localhost certificate whose notAfter is in the past so certificate renewal can be exercised.
+async function makeExpiredCertificate(certFile, keyFile) {
+  const work = await mkdtemp(path.join(os.tmpdir(), 'slidesci-expired-'));
+  try {
+    await mkdir(path.join(work, 'newcerts'));
+    await writeFile(path.join(work, 'index.txt'), '');
+    await writeFile(path.join(work, 'serial'), '1000\n');
+    await writeFile(path.join(work, 'ca.cnf'), [
+      '[ca]', 'default_ca = CA_default', '[CA_default]', 'dir = .', 'database = ./index.txt',
+      'new_certs_dir = ./newcerts', 'serial = ./serial', 'default_md = sha256',
+      'policy = policy_any', 'x509_extensions = ext', '[policy_any]', 'commonName = supplied',
+      '[ext]', 'subjectAltName = DNS:localhost,IP:127.0.0.1,IP:::1',
+      'basicConstraints = critical,CA:FALSE', 'keyUsage = critical,digitalSignature,keyEncipherment',
+      'extendedKeyUsage = serverAuth', ''
+    ].join('\n'));
+    const key = path.join(work, 'key.pem'), request = path.join(work, 'request.pem'), output = path.join(work, 'cert.pem');
+    execFileSync('/usr/bin/openssl', ['req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=localhost', '-keyout', key, '-out', request], { stdio: 'ignore' });
+    execFileSync('/usr/bin/openssl', ['ca', '-batch', '-config', path.join(work, 'ca.cnf'), '-selfsign', '-keyfile', key, '-in', request, '-out', output, '-startdate', '20200101000000Z', '-enddate', '20200102000000Z'], { cwd: work, stdio: 'ignore' });
+    await writeFile(certFile, await readFile(output));
+    await writeFile(keyFile, await readFile(key));
+  } finally { await rm(work, { recursive: true, force: true }); }
+}
+
+function failureOutput(callback) {
+  try { callback(); }
+  catch (error) { return `${error.stdout || ''}${error.stderr || ''}${error.message || ''}`; }
+  assert.fail('expected the command to fail');
 }
 
 test('install upgrades in place, stops old service, reuses trusted cert, clears Wef cache and preserves original prior on uninstall', async () => {
@@ -260,4 +342,156 @@ test('upgrade protects running PowerPoint Wef cache, respects declined upgrade a
     await writeFile(path.join(wefDir, 'SlideSCI-Mac.xml'), '<OfficeApp><Tampered/></OfficeApp>');
     assert.throws(() => runPkg(v2Pkg, ['--upgrade', 'yes', '--trust-certificate', 'no']), /PowerPoint 注册已被另行修改/);
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('Stop fails and blocks upgrade or uninstall before changes when bootout fails while print reports loaded', async () => {
+  const fixture = await upgradeEnvironment('slidesci-stop-guard-');
+  try {
+    fixture.runPkg(fixture.v1Pkg, 'install', ['--trust-certificate', 'no', '--clear-wef-cache', 'no']);
+    const installationBefore = await fixture.installation();
+    const bootstrapsBefore = (await fixture.launchCalls()).filter(line => line.startsWith('bootstrap ')).length;
+    const failBootout = { FAKE_LAUNCHCTL_FAIL_BOOTOUT: '1' };
+
+    let output = failureOutput(() => fixture.runPkg(fixture.v1Pkg, 'stop', [], failBootout));
+    assert.match(output, /无法停止 SlideSCI 后台自启服务/);
+    assert.equal(await fixture.buildVersion(), '0.1.2');
+
+    output = failureOutput(() => fixture.runPkg(fixture.v2Pkg, 'install', ['--upgrade', 'yes', '--trust-certificate', 'no'], failBootout));
+    assert.match(output, /无法停止 SlideSCI 后台自启服务/);
+    assert.equal(await fixture.buildVersion(), '0.1.2', 'upgrade leaves the installed app untouched');
+    assert.equal(await fixture.manifest(), v1Manifest, 'upgrade leaves registrations untouched');
+    assert.deepEqual(await fixture.installation(), installationBefore, 'upgrade leaves the installation record untouched');
+    assert.equal((await fixture.launchCalls()).filter(line => line.startsWith('bootstrap ')).length, bootstrapsBefore);
+
+    output = failureOutput(() => fixture.runPkg(fixture.v1Pkg, 'uninstall', [], failBootout));
+    assert.match(output, /无法停止 SlideSCI 后台自启服务/);
+    assert.equal(await fixture.buildVersion(), '0.1.2', 'uninstall leaves the installed app in place');
+    assert.equal(await fixture.manifest(), v1Manifest, 'uninstall leaves registrations in place');
+    assert.equal(await readFile(path.join(fixture.home, 'Library/LaunchAgents/com.slidesci.mac.service.plist'), 'utf8').then(() => true, () => false), true);
+  } finally { await rm(fixture.home, { recursive: true, force: true }); }
+});
+
+test('a failed upgrade restores the previous app, registrations, record and running service', async () => {
+  const fixture = await upgradeEnvironment('slidesci-upgrade-rollback-');
+  const unreadable = path.join(fixture.v2Pkg, 'unreadable');
+  try {
+    await mkdir(unreadable);
+    await writeFile(path.join(unreadable, 'payload.txt'), 'payload');
+    await chmod(unreadable, 0);
+    fixture.runPkg(fixture.v1Pkg, 'install', ['--trust-certificate', 'yes', '--clear-wef-cache', 'no']);
+    const bootstrapsBefore = (await fixture.launchCalls()).filter(line => line.startsWith('bootstrap ')).length;
+
+    const output = failureOutput(() => fixture.runPkg(fixture.v2Pkg, 'install', ['--upgrade', 'yes', '--trust-certificate', 'no']));
+    assert.match(output, /EACCES|Permission denied/);
+    assert.match(output, /已恢复升级前正在运行的 SlideSCI 后台服务/);
+    assert.equal(await fixture.buildVersion(), '0.1.2');
+    assert.equal(await fixture.manifest(), v1Manifest);
+    assert.equal((await fixture.installation()).version, '0.1.2');
+    const launchCalls = (await fixture.launchCalls()).filter(line => line.startsWith('boot'));
+    assert.deepEqual(launchCalls.slice(bootstrapsBefore), [
+      `bootout gui/${process.getuid()}/com.slidesci.mac.service`,
+      `bootstrap gui/${process.getuid()} ${path.join(fixture.home, 'Library/LaunchAgents/com.slidesci.mac.service.plist')}`
+    ], 'the service stopped for the upgrade is started again after rollback');
+  } finally { await chmod(unreadable, 0o700).catch(() => {}); await rm(fixture.home, { recursive: true, force: true }); }
+});
+
+test('upgrade rolls back if the new version cannot start the previously running service', async () => {
+  const fixture = await upgradeEnvironment('slidesci-upgrade-start-failure-');
+  try {
+    fixture.runPkg(fixture.v1Pkg, 'install', ['--trust-certificate', 'no']);
+    const prior = await fixture.installation();
+    const output = failureOutput(() => fixture.runPkg(fixture.v2Pkg, 'install',
+      ['--upgrade', 'yes', '--trust-certificate', 'no'], { FAKE_LAUNCHCTL_FAIL_VERSION: '0.2.0' }));
+    assert.match(output, /Bootstrap failed for the new version/);
+    assert.doesNotMatch(output, /已升级到/);
+    assert.equal(await fixture.buildVersion(), '0.1.2');
+    assert.equal(await fixture.manifest(), v1Manifest);
+    assert.deepEqual(await fixture.installation(), prior);
+    await readFile(path.join(fixture.launchState, 'loaded'));
+  } finally { await rm(fixture.home, { recursive: true, force: true }); }
+});
+
+test('rollback restoration failures are reported together with the original upgrade error', async () => {
+  const fixture = await upgradeEnvironment('slidesci-upgrade-rollback-error-');
+  try {
+    fixture.runPkg(fixture.v1Pkg, 'install', ['--trust-certificate', 'no', '--clear-wef-cache', 'no']);
+    const plist = path.join(fixture.home, 'Library/LaunchAgents/com.slidesci.mac.service.plist');
+    await rm(plist);
+    await mkdir(path.join(plist, 'blocked'), { recursive: true });
+
+    const output = failureOutput(() => fixture.runPkg(fixture.v2Pkg, 'install', ['--upgrade', 'yes', '--trust-certificate', 'no']));
+    assert.match(output, /EISDIR|ENOTEMPTY|directory/i, 'the original write failure is kept');
+    assert.match(output, /回滚未完全完成/);
+    assert.match(output, /重新启动后台服务/);
+    assert.equal(await fixture.buildVersion(), '0.1.2');
+    assert.equal(await fixture.manifest(), v1Manifest);
+    assert.equal((await fixture.installation()).version, '0.1.2');
+  } finally { await rm(fixture.home, { recursive: true, force: true }); }
+});
+
+test('Start repairs certificate trust without restarting a service left running after an unanswered prompt', async () => {
+  const cases = [
+    { name: 'declined', args: ['--trust-certificate', 'no'], env: {} },
+    { name: 'canceled', args: ['--trust-certificate', 'yes'], env: { FAKE_SECURITY_CANCEL: '1' } }
+  ];
+  for (const item of cases) {
+    const fixture = await upgradeEnvironment(`slidesci-trust-repair-${item.name}-`);
+    try {
+      fixture.runPkg(fixture.v1Pkg, 'install', [...item.args, '--clear-wef-cache', 'no'], item.env);
+      assert.deepEqual(await fixture.trusted(), [], `${item.name} authorization leaves the certificate untrusted`);
+      const loaded = await readFile(path.join(fixture.launchState, 'loaded'), 'utf8');
+      const bootCalls = (await fixture.launchCalls()).filter(line => line.startsWith('boot'));
+
+      const output = fixture.runPkg(fixture.v1Pkg, 'start', ['--trust-certificate', 'yes']);
+      assert.match(output, /已信任 PowerPoint 使用的本机证书/);
+      assert.match(output, /已经运行/);
+      const current = new X509Certificate(await readFile(path.join(fixture.home, 'Library/Application Support/SlideSCI-Mac-Installer/tls/localhost.crt'))).fingerprint.replaceAll(':', '');
+      assert.deepEqual(await fixture.trusted(), [current]);
+      assert.equal(await readFile(path.join(fixture.launchState, 'loaded'), 'utf8'), loaded, 'the running agent is not replaced');
+      assert.deepEqual((await fixture.launchCalls()).filter(line => line.startsWith('boot')), bootCalls, 'trusting the certificate does not restart the service');
+    } finally { await rm(fixture.home, { recursive: true, force: true }); }
+  }
+});
+
+test('Start renews an expired certificate and restarts the running service so the renewed TLS is served', async () => {
+  const fixture = await upgradeEnvironment('slidesci-expired-active-');
+  try {
+    fixture.runPkg(fixture.v1Pkg, 'install', ['--trust-certificate', 'yes', '--clear-wef-cache', 'no']);
+    const tls = path.join(fixture.home, 'Library/Application Support/SlideSCI-Mac-Installer/tls');
+    await makeExpiredCertificate(path.join(tls, 'localhost.crt'), path.join(tls, 'localhost.key'));
+    const expired = new X509Certificate(await readFile(path.join(tls, 'localhost.crt')));
+
+    const output = fixture.runPkg(fixture.v1Pkg, 'start', ['--trust-certificate', 'yes']);
+    assert.match(output, /已过期，正在生成新证书/);
+    const renewed = new X509Certificate(await readFile(path.join(tls, 'localhost.crt')));
+    assert.notEqual(renewed.fingerprint, expired.fingerprint);
+    assert.ok(Date.parse(renewed.validTo) > Date.now());
+    assert.equal((await readdir(tls)).filter(name => name.startsWith('retired-')).length, 1);
+    const launchCalls = (await fixture.launchCalls()).filter(line => line.startsWith('boot'));
+    assert.deepEqual(launchCalls.slice(-2), [
+      `bootout gui/${process.getuid()}/com.slidesci.mac.service`,
+      `bootstrap gui/${process.getuid()} ${path.join(fixture.home, 'Library/LaunchAgents/com.slidesci.mac.service.plist')}`
+    ], 'the old service is stopped before the renewed certificate is served');
+    assert.ok((await fixture.trusted()).includes(renewed.fingerprint.replaceAll(':', '')));
+  } finally { await rm(fixture.home, { recursive: true, force: true }); }
+});
+
+test('Start leaves the WPS service running if the replacement TLS pair cannot be staged', async () => {
+  const fixture = await upgradeEnvironment('slidesci-expired-stage-failure-');
+  const tls = path.join(fixture.home, 'Library/Application Support/SlideSCI-Mac-Installer/tls');
+  const cert = path.join(tls, 'localhost.crt'), key = path.join(tls, 'localhost.key');
+  try {
+    fixture.runPkg(fixture.v1Pkg, 'install', ['--trust-certificate', 'no']);
+    await makeExpiredCertificate(cert, key);
+    const oldPair = await Promise.all([readFile(cert), readFile(key)]);
+    const boots = (await fixture.launchCalls()).filter(line => line.startsWith('boot'));
+    await chmod(tls, 0o500);
+    assert.match(failureOutput(() => fixture.runPkg(fixture.v1Pkg, 'start')), /EACCES|EPERM/);
+    assert.deepEqual((await fixture.launchCalls()).filter(line => line.startsWith('boot')), boots);
+    assert.deepEqual(await Promise.all([readFile(cert), readFile(key)]), oldPair);
+    await readFile(path.join(fixture.launchState, 'loaded'));
+  } finally {
+    await chmod(tls, 0o700);
+    await rm(fixture.home, { recursive: true, force: true });
+  }
 });

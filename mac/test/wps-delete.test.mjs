@@ -7,6 +7,7 @@ function collection(items) {
 }
 function shape(id, type, parent, children = []) {
   const node = { Id: id, Type: type, Name: `shape ${id}`, Left: 0, Top: 0, Width: 10, Height: 10, Rotation: 0, deleted: false };
+  node.Tags = { Count: 1, Name: () => 'AUDIT_ID', Value: () => `SHAPE-${id}` };
   node.GroupItems = collection(children);
   node.Delete = () => {
     if (node.deleted) throw new Error(`shape ${id} was already deleted`);
@@ -36,6 +37,9 @@ test('wps delete removes a group once even when its members are listed too', asy
   } };
   const host = connectWps({ async request(route) { throw new Error(`unexpected ${route}`); }, async reportError() {} });
   t.after(() => host.dispose());
+  const snapshot = await host.context({ scope: 'slide', geometry: true, tags: true });
+  assert.deepEqual(snapshot.shapes[0].tags, { AUDIT_ID: 'SHAPE-10' });
+  assert.deepEqual(snapshot.shapes[0].children[0].tags, { AUDIT_ID: 'SHAPE-11' });
   const result = await host.apply([{ op: 'delete', ids: ['10', '11', '12'] }], { readback: false });
   assert.deepEqual(result, { applied: 1 });
   assert.equal(group.deleted, true);
@@ -43,4 +47,46 @@ test('wps delete removes a group once even when its members are listed too', asy
   assert.deepEqual(slideShapes.items.map(item => item.Id), [20]);
   await assert.rejects(host.apply([{ op: 'delete', ids: ['20', '99'] }], { readback: false }), /找不到对象 99/);
   assert.equal(keep.deleted, false, 'a missing id is reported before anything is deleted');
+});
+
+test('wps discards a new textbox if the host rejects its properties', async t => {
+  const original = globalThis.window;
+  t.after(() => { if (original === undefined) delete globalThis.window; else globalThis.window = original; });
+  const shapes = collection([]);
+  shapes.items.push(shape(20, 1, () => shapes));
+  shapes.AddTextbox = () => {
+    const box = shape(21, 17, () => shapes);
+    Object.defineProperty(box, 'Name', { set() { throw new Error('WPS rejected the title name'); } });
+    shapes.items.push(box);
+    return box;
+  };
+  const slide = { SlideID: 1, SlideIndex: 1, Shapes: shapes };
+  globalThis.window = { Application: {
+    ActivePresentation: { Name: 'titles.pptx', Slides: collection([slide]), PageSetup: { SlideWidth: 720, SlideHeight: 540 } },
+    ActiveWindow: { View: { Slide: slide }, Selection: { Type: 0 } }
+  } };
+  const host = connectWps();
+  t.after(() => host.dispose());
+  await assert.rejects(host.apply([{ op: 'insertText', name: 'title', text: 'Sample' }], { readback: false }), /rejected the title name/);
+  assert.deepEqual(shapes.items.map(item => item.Id), [20]);
+});
+
+test('a WPS delete addressed to the original slide ignores the same shape ID on a newly selected slide', async t => {
+  const original = globalThis.window;
+  t.after(() => { if (original === undefined) delete globalThis.window; else globalThis.window = original; });
+  const slides = [41, 42].map((id, index) => {
+    const shapes = collection([]);
+    shapes.items.push(shape(20, 17, () => shapes));
+    return { SlideID: id, SlideIndex: index + 1, Shapes: shapes };
+  });
+  globalThis.window = { Application: {
+    ActivePresentation: { Name: 'fixture.pptx', FullName: '/tmp/fixture.pptx', Slides: collection(slides) },
+    ActiveWindow: { View: { Slide: slides[1] }, Selection: { Type: 0 } }
+  } };
+  const host = connectWps();
+  t.after(() => host.dispose());
+  await host.apply([{ op: 'delete', ids: ['20'] }],
+    { target: { presentationId: '/tmp/fixture.pptx', slideId: '41' }, readback: false });
+  assert.equal(slides[0].Shapes.Count, 0);
+  assert.equal(slides[1].Shapes.Count, 1);
 });

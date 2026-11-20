@@ -6,6 +6,7 @@ import { normalizeLatex, latexToMathMlBatch, mathMlToOmml, latexToSvg, readSvg }
 import { buildContentDocument, highlightedRuns } from '../lib/content-document.mjs';
 import { contentHandlers } from '../lib/content.mjs';
 import { parsePresentation, extractFragment } from '../lib/pptx.mjs';
+import { actions } from '../src/features/content.js';
 
 const MATH = 'http://schemas.openxmlformats.org/officeDocument/2006/math';
 const DRAWING = 'http://schemas.openxmlformats.org/drawingml/2006/main';
@@ -20,6 +21,28 @@ const runs = document => paragraphs(document).flatMap(paragraph => paragraph.run
   assert.equal(document.getElementsByTagNameNS(DRAWING, 'rPr')[0].getAttribute('sz'), '2400');
   assert.doesNotMatch(omml, /svg|blip|annotation/);
   assert.throws(() => mathMlToOmml(math('<maction><mi>x</mi></maction>')), /不支持 MathML 元素/);
+});
+
+test('Markdown text-box conversion still inserts and removes on the captured slide after rendering', async () => {
+  const original = { id: '4', text: '# Original', width: 100 };
+  const unrelated = { id: '4', text: 'Keep me', width: 100 };
+  const slides = new Map([['256', [original]], ['257', [unrelated]]]);
+  let active = '256';
+  const target = options => slides.get(options.target?.slideId ?? active);
+  const host = {
+    async context() { return { presentationId: 'doc', slideId: active, selectionIds: ['4'], shapes: slides.get(active) }; },
+    async insertFragment(fragment, options) { target(options).push({ id: '5', text: fragment.pptx }); },
+    async apply([{ ids }], options) {
+      const page = target(options);
+      page.splice(page.findIndex(shape => ids.includes(shape.id)), 1);
+    }
+  };
+  const ctx = { host, settings: { get: () => 'light' }, refresh: async () => {}, services: {
+    async request() { active = '257'; return { fragment: { pptx: 'rendered' } }; }
+  } };
+  await actions.find(action => action.id === 'content.richText').run(ctx, { theme: 'light' });
+  assert.deepEqual(slides.get('256'), [{ id: '5', text: 'rendered' }]);
+  assert.deepEqual(slides.get('257'), [unrelated]);
 });
 
 test('equation macros are shared inside one conversion and reset for the next conversion', () => {

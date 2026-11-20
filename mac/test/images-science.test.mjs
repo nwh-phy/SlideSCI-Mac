@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
 import { imageHandlers, autoDisplayLevels, display16, firstTiffTags, tiffFov, readImageDimensions } from '../lib/images.mjs';
-import { scaleLayout, defaultScale, markerBounds, relativeRegion, visibleFov, FOV_PREFIX, SCALE_PREFIX, near, clipLine, lineBounds, serializeTag, parse, imagesFor } from '../src/features/images-science-core.js';
-import { applyPseudoColors } from '../src/features/images.js';
-import { applyZoomEntries } from '../src/features/science.js';
+import { scaleLayout, defaultScale, localBounds, markerBounds, relativeRegion, visibleFov, FOV_PREFIX, SCALE_PREFIX, near, clipLine, lineBounds, serializeTag, parse, imagesFor, formatAmount } from '../src/features/images-science-core.js';
+import { applyPseudoColors, actions as imageActions } from '../src/features/images.js';
+import { applyZoomEntries, reconcileSlide } from '../src/features/science.js';
 
 // Small, independently encoded uncompressed TIFF fixtures; no user files or Office documents.
 function tiff16(samples, channels, little = true, associated = false) {
@@ -72,6 +72,77 @@ test('native scale geometry uses cropped physical FOV and validates full label f
   const fov = visibleFov(image), layout = scaleLayout(image, fov, { ...defaultScale, widthMicrometers: 10, fontSize: 10 }, { width: 24, height: 12 });
   assert.equal(fov.width, 50); assert.equal(layout.bar.width, 40); assert.ok(layout.text.left >= 0); assert.ok(layout.text.top >= 0);
   assert.throws(() => scaleLayout(image, fov, { ...defaultScale, widthMicrometers: 100 }, { width: 24, height: 12 }), /超出/);
+});
+test('legacy tagged derived FOV calibrates the full raster and later crop reduces it', () => {
+  // Zoom, merged-channel and retained pseudo-color pictures historically carried SLIDESCI_FOV_VISIBLE.
+  // Their recorded FOV is full-raster calibration, so cropping afterwards must still shrink it.
+  const image = { width: 200, height: 100, alternativeText: FOV_PREFIX + JSON.stringify({ width: 100, height: 50, unit: 'nm' }),
+    tags: { SLIDESCI_FOV_VISIBLE: '1' }, crop: { left: .25, top: 0, right: 0, bottom: 0 } };
+  const visible = visibleFov(image);
+  assert.ok(Math.abs(visible.width - .075) < 1e-12); assert.ok(Math.abs(visible.height - .05) < 1e-12);
+  const layout = scaleLayout(image, visible, { ...defaultScale, widthMicrometers: .01, lengthUnit: 'nm', fontSize: 10 }, { width: 24, height: 12 });
+  assert.equal(layout.label, '10nm');
+  assert.ok(Math.abs(layout.bar.width - 200 * 10 / 75) < 1e-9);
+  // Crop is cumulative rather than double-counted when only part of the raster is removed.
+  image.crop = { left: .1, right: .15, top: .1, bottom: .4 };
+  assert.ok(Math.abs(visibleFov(image).width - .075) < 1e-12);
+  assert.ok(Math.abs(visibleFov(image).height - .025) < 1e-12);
+});
+test('Windows intersection FOV already accounts for the picture crop', () => {
+  const image = { type: 'picture', width: 200, height: 100,
+    alternativeText: FOV_PREFIX + JSON.stringify({ Width: 50, Height: 50, Unit: 'μm', Source: '由原图标定和实际取图范围换算' }),
+    tags: { SLIDESCI_FOV_VISIBLE: '1', SLIDESCI_FOV_SOURCE: '100;50' }, crop: { left: .5, right: 0, top: 0, bottom: 0 } };
+  assert.deepEqual(visibleFov(image), { width: 50, height: 50 });
+});
+test('scale labels retain small lengths in the chosen display unit without float noise', () => {
+  const image = { width: 200, height: 100 }, fov = { width: 100, height: 50 };
+  const label = (widthMicrometers, lengthUnit) => scaleLayout(image, fov, { ...defaultScale, widthMicrometers, lengthUnit }, { width: 24, height: 12 }).label;
+  assert.equal(label(.004, 'μm'), '0.004μm');
+  assert.equal(label(.01, 'nm'), '10nm');
+  assert.equal(label(.004, 'nm'), '4nm');
+  assert.equal(label(50, 'μm'), '50μm');
+  assert.equal(label(.1 + .2, 'μm'), '0.3μm');
+  assert.equal(formatAmount(1 / 3), '0.333333');
+  assert.equal(formatAmount(.004), '0.004');
+  assert.equal(formatAmount(.01), '0.01');
+  assert.equal(formatAmount(4e-9), '0.000000004');
+  assert.equal(formatAmount(0), '0');
+});
+for (const grouped of [true, false]) test(`reconciling a ${grouped ? 'grouped' : 'ungrouped'} source repairs only its saved scale label`, async t => {
+  const previous = globalThis.document;
+  globalThis.document = { createElement: () => ({ getContext: () => ({ measureText: text => ({ width: text.length * 6 }) }) }) };
+  t.after(() => { if (previous === undefined) delete globalThis.document; else globalThis.document = previous; });
+
+  const fov = { width: 1, height: .5, unit: 'μm' };
+  const settings = { ...defaultScale, widthMicrometers: .004, groupWithImage: grouped };
+  const sourceTags = { SLIDESCI_IMAGE_UUID: 'SOURCE' };
+  const picture = { id: 'picture', name: 'Source', type: 'picture', left: 40, top: 50, width: 200, height: 100, rotation: 0,
+    alternativeText: FOV_PREFIX + JSON.stringify(fov) + '\n' + SCALE_PREFIX + JSON.stringify(settings),
+    tags: grouped ? { ...sourceTags, SLIDESCI_SCALE_CONTENT: '1' } : sourceTags };
+  const bounds = scaleLayout(picture, fov, settings);
+  const oldText = { ...bounds.text, left: bounds.text.left + 12, width: bounds.text.width - 12 };
+  const bar = { id: 'bar', type: 'shape', ...localBounds(picture, bounds.bar, 0),
+    tags: { SLIDESCI_SCALE_OWNER: 'SOURCE', SLIDESCI_SCALE_PART: 'bar' } };
+  const label = { id: 'label', name: '比例尺文字', type: 'text', text: '0μm', ...localBounds(picture, oldText, 0),
+    tags: { SLIDESCI_SCALE_OWNER: 'SOURCE', SLIDESCI_SCALE_PART: 'text' } };
+  const unrelated = { ...label, id: 'unrelated', left: label.left - 40, tags: { SLIDESCI_SCALE_PART: 'text' } };
+  const shapes = [picture, bar, label, unrelated];
+  const state = { width: 960, height: 540, shapes: grouped ? [{ ...picture, id: 'group', type: 'group', children: shapes,
+    tags: { ...sourceTags, SLIDESCI_SCALE_GROUP: '1', SLIDESCI_SCALE_CALIBRATION: serializeTag({ width: 1, height: .5 }) } }] : shapes };
+  const updated = [];
+  const ctx = { host: { kind: 'powerpoint', async context() { return state; }, async apply(commands) {
+    for (const command of commands) {
+      assert.equal(command.op, 'update');
+      Object.assign(shapes.find(shape => shape.id === command.id), command.properties);
+      updated.push(command.id);
+    }
+    return state;
+  } } };
+  await reconcileSlide(ctx);
+  assert.equal(label.text, '0.004μm');
+  assert.equal(label.width, bounds.text.width);
+  assert.equal(unrelated.text, '0μm');
+  assert.deepEqual(updated, ['label']);
 });
 test('scientific settings and source paths survive native tag uppercasing', () => {
   const record = { role: 'marker', placement: 'left', name: '放大图 α', source: '/Users/Researcher/Images/Cell.tif' };
@@ -186,6 +257,98 @@ test('successful zoom keeps its source UUID distinct from the zoom entry key', a
   assert.ok(linked.some(link => link.role === 'marker'));
   assert.ok(linked.some(link => link.role === 'zoom'));
   assert.ok(linked.every(link => link.sourceUUID === 'SOURCE' && link.key === record.key));
+});
+
+test('zoom creation records full-raster calibration and ignores legacy visible tagging', async () => {
+  const pixels = await sharp({ create: { width: 64, height: 48, channels: 4, background: '#808080ff' } }).png().toBuffer();
+  const crop = { left: .25, right: 0, top: 0, bottom: 0 };
+  const state = { width: 960, height: 540, shapes: [{ id: 'source', name: 'Source', type: 'picture', left: 40, top: 50, width: 200, height: 100, rotation: 0, crop,
+    alternativeText: FOV_PREFIX + JSON.stringify({ width: 100, height: 50, unit: 'nm' }),
+    tags: { SLIDESCI_IMAGE_UUID: 'SOURCE' }, image: { digest: 'source-pixels' } }] };
+  let nextId = 0;
+  const ctx = {
+    host: {
+      async context() { return structuredClone(state); },
+      async images() { return [{ data: pixels.toString('base64'), mime: 'image/png', width: 64, height: 48 }]; },
+      async apply(commands) {
+        for (const command of commands) {
+          if (command.op === 'insertShape' || command.op === 'insertImage') state.shapes.push({ ...command, id: 'created-' + ++nextId,
+            type: command.op === 'insertImage' ? 'picture' : 'shape' });
+          else if (command.op === 'update') {
+            const shape = state.shapes.find(shape => shape.id === command.id);
+            shape.tags = { ...shape.tags, ...command.properties.tags };
+            Object.assign(shape, command.properties, { tags: shape.tags });
+          } else if (command.op === 'replaceImage') {
+            const shape = state.shapes.find(shape => shape.id === command.id);
+            assert.equal(command.preserveCrop, false);
+            delete shape.crop;
+          } else if (command.op === 'delete') state.shapes = state.shapes.filter(shape => !command.ids.includes(shape.id));
+          else throw new Error('Unexpected zoom command: ' + command.op);
+        }
+        return structuredClone(state);
+      }
+    },
+    services: { async request(route, input) {
+      if (route === 'images/crop') return imageHandlers.crop(input, {});
+      if (route === 'images/settings') return {};
+      throw new Error('Unexpected zoom service: ' + route);
+    } }
+  };
+  await applyZoomEntries(ctx, [state.shapes[0]], [{ name: 'Zoom', region: { x: 0, y: 0, width: .25, height: .5, rotation: 0 },
+    placement: 'right', guides: false, color: '#ff0000', lineWidth: 1.5, dash: 'solid' }]);
+  const zoom = state.shapes.find(shape => parse(shape.tags?.SLIDESCI_ZOOM_RECORD)?.role === 'zoom');
+  const fov = parse(zoom.alternativeText.split('\n').find(line => line.startsWith(FOV_PREFIX)).slice(FOV_PREFIX.length));
+  // 100 nm full width, 25 % cropped away, 25 % region width => 18.75 nm; the FOV is not reduced twice.
+  assert.ok(Math.abs(fov.width - .01875) < 1e-12); assert.ok(Math.abs(fov.height - .025) < 1e-12);
+  assert.equal(fov.unit, 'μm');
+  assert.equal(zoom.tags.SLIDESCI_FOV_VISIBLE, undefined); assert.equal(zoom.crop, undefined);
+  // A later native crop applies to the stored full-raster FOV instead of being suppressed by a tag.
+  zoom.crop = { left: .2, right: 0, top: 0, bottom: 0 };
+  assert.ok(Math.abs(visibleFov(zoom).width - .015) < 1e-12);
+
+  // Old records contained the raw calibration in both signatures and did not detect an
+  // already-miscalibrated zoom when nothing had moved. Synchronization migrates both together.
+  const [legacy] = parse(state.shapes[0].tags.SLIDESCI_ZOOM_RECORDS);
+  const rawFov = { width: 100, height: 50, unit: 'nm' };
+  for (const key of ['sourceSignature', 'cropSignature']) legacy[key] = JSON.stringify({ ...JSON.parse(legacy[key]), fov: rawFov });
+  state.shapes[0].tags.SLIDESCI_ZOOM_RECORDS = serializeTag([legacy]);
+  zoom.alternativeText = FOV_PREFIX + JSON.stringify({ ...fov, width: .025 });
+  await reconcileSlide(ctx);
+  assert.ok(Math.abs(visibleFov(zoom).width - .01875) < 1e-12);
+  assert.equal(zoom.crop, undefined);
+});
+
+test('merged channel pictures use full-raster calibration instead of a visible tag', async () => {
+  const pixels = await sharp({ create: { width: 2, height: 1, channels: 4, background: '#808080ff' } }).png().toBuffer();
+  const crop = { left: .25, right: 0, top: 0, bottom: 0 };
+  const channel = (id, name) => ({ id, name, type: 'picture', left: 10, top: 20, width: 200, height: 100, rotation: 0, crop,
+    alternativeText: FOV_PREFIX + JSON.stringify({ width: 100, height: 50, unit: 'μm' }), tags: {} });
+  let state = { width: 960, height: 540, selectionIds: ['a', 'b'], shapes: [channel('a', 'DAPI'), channel('b', 'FITC')] };
+  let inserted = null, applied = [];
+  const ctx = {
+    host: {
+      async context() { return state; },
+      async images() { return state.shapes.map(shape => ({ id: shape.id, data: pixels.toString('base64'), mime: 'image/png', width: 2, height: 1 })); },
+      async apply(commands) {
+        applied = applied.concat(commands);
+        for (const command of commands) if (command.op === 'insertImage') {
+          inserted = { id: 'merged', type: 'picture', ...command, tags: command.tags };
+          state = { ...state, shapes: [...state.shapes, inserted] };
+        }
+        return state;
+      }
+    },
+    services: { async request(route) {
+      if (route === 'images/merge') return { data: pixels.toString('base64'), mime: 'image/png', width: 200, height: 100 };
+      throw new Error('Unexpected merge service: ' + route);
+    } }
+  };
+  await imageActions.find(action => action.id === 'images.merge').run(ctx);
+  assert.equal(inserted.tags.SLIDESCI_FOV_VISIBLE, undefined);
+  assert.ok(Math.abs(visibleFov(inserted).width - 75) < 1e-12);
+  inserted.crop = { left: .2, right: 0, top: 0, bottom: 0 };
+  assert.ok(Math.abs(visibleFov(inserted).width - 60) < 1e-12);
+  assert.ok(applied.some(command => command.op === 'select' && command.ids[0] === 'merged'));
 });
 
 test('batched original images follow selection identities and keep each picture crop', async () => {

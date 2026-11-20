@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
 import https from 'node:https';
+import { createSecureContext } from 'node:tls';
 import { lookup } from 'node:dns/promises';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID, X509Certificate } from 'node:crypto';
@@ -138,7 +139,9 @@ async function serviceRecord() {
 }
 async function stop() {
   const hadAgent = launchAgentLoaded();
-  if (hadAgent) bootoutLaunchAgent();
+  if (hadAgent && !bootoutLaunchAgent()) {
+    throw new Error('无法停止 SlideSCI 后台自启服务；未修改安装目录或加载项注册，升级与卸载已中止。请稍后重试或重启电脑。');
+  }
   const record = await serviceRecord();
   if (!record) {
     console.log(hadAgent ? '已停止 SlideSCI 后台自启服务。' : 'SlideSCI 本机服务未在运行。');
@@ -194,18 +197,21 @@ function httpsSession(certificate) {
     request.on('error', reject);
   });
 }
-async function start() {
+async function start({ launchAgent = launchctlAvailable(), trust = true } = {}) {
   if (!await exists(recordFile) || !await exists(path.join(application, 'BUILD-INFO.json'))) throw new Error('请先运行 Install.command。');
-  if (await serviceRecord() || launchAgentLoaded()) { console.log('SlideSCI 本机服务已经运行。'); return; }
+  let running = Boolean(await serviceRecord() || launchAgentLoaded());
   const { days } = await certificateStatus();
   if (days <= 0) {
     console.log('PowerPoint 使用的本机证书已过期，正在生成新证书。');
-    await replaceCertificate();
+    await replaceCertificate(running);
+    running = false;
+    trust = false; // Renewal already attempted trust for the new certificate.
   } else if (days <= CERTIFICATE_RENEW_DAYS) {
     console.log(`提醒：PowerPoint 使用的本机证书将在 ${Math.ceil(days)} 天后到期，到期后 PowerPoint 无法加载 SlideSCI。`);
     console.log('可运行安装目录中的 RenewCertificate.command 提前生成新证书。');
   }
-  const trusted = await trustCertificate();
+  const trusted = trust ? await trustCertificate() : certificateTrusted(path.join(tlsDirectory(), 'localhost.crt'));
+  if (running) { console.log('SlideSCI 本机服务已经运行。'); return; }
   const certificate = await fs.readFile(path.join(state, 'tls/localhost.crt'));
   if (!process.env.SLIDESCI_LAUNCHCTL) {
     const reservations = [];
@@ -222,8 +228,8 @@ async function start() {
   // Keep one previous log so a long-lived installation never grows the log without bound.
   const logSize = await fs.stat(logFile).then(item => item.size, () => 0);
   if (logSize > 5 * 1024 * 1024) await fs.rename(logFile, logFile + '.1');
-  await writeLaunchAgent();
-  if (launchctlAvailable()) {
+  if (launchAgent) {
+    await writeLaunchAgent();
     execFileSync(launchctlTool, ['bootstrap', launchDomain(), launchAgentFile], { stdio: ['ignore', 'pipe', 'pipe'] });
     if (!process.env.SLIDESCI_LAUNCHCTL) await waitForListening(certificate);
     console.log('SlideSCI 后台服务已启动并设为登录自动运行：WPS http://127.0.0.1:3000；PowerPoint https://localhost:3443。');
@@ -265,8 +271,7 @@ async function start() {
 const CERTIFICATE_DAYS = 825;
 const CERTIFICATE_RENEW_DAYS = 30;
 const tlsDirectory = () => path.join(state, 'tls');
-async function certificate() {
-  const directory = tlsDirectory();
+async function certificate(directory = tlsDirectory()) {
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   const cert = path.join(directory, 'localhost.crt'), key = path.join(directory, 'localhost.key');
   if (await exists(cert) && await exists(key)) return false;
@@ -285,13 +290,40 @@ async function certificateStatus() {
   return { expires, days: (expires - Date.now()) / 86400000 };
 }
 // The retired pair is kept beside the new one; the old trust setting is removed, the new one asked for.
-async function replaceCertificate() {
-  const directory = tlsDirectory(), retired = path.join(directory, `retired-${stamp()}`);
-  await fs.mkdir(retired, { recursive: true, mode: 0o700 });
-  for (const name of ['localhost.crt', 'localhost.key']) {
-    if (await exists(path.join(directory, name))) await fs.rename(path.join(directory, name), path.join(retired, name));
-  }
-  await certificate();
+async function replaceCertificate(running) {
+  const directory = tlsDirectory();
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  const stage = await fs.mkdtemp(path.join(directory, '.renew-'));
+  const retired = path.join(directory, `retired-${stamp()}`);
+  const names = ['localhost.crt', 'localhost.key'];
+  const backedUp = [], promoted = [];
+  try {
+    await certificate(stage);
+    createSecureContext({ cert: await fs.readFile(path.join(stage, names[0])), key: await fs.readFile(path.join(stage, names[1])) });
+    await fs.mkdir(retired, { mode: 0o700 });
+    for (const name of names) {
+      const original = path.join(directory, name);
+      if (await exists(original)) {
+        await fs.copyFile(original, path.join(retired, name), fs.constants.COPYFILE_EXCL);
+        backedUp.push(name);
+      }
+      await fs.rename(path.join(stage, name), original);
+      promoted.push(name);
+    }
+    // The running server keeps its old TLS context until the replacement pair is ready.
+    if (running) await stop();
+  } catch (error) {
+    const recovery = [];
+    for (const name of promoted.reverse()) {
+      const original = path.join(directory, name);
+      try {
+        if (backedUp.includes(name)) await fs.copyFile(path.join(retired, name), original);
+        else await fs.rm(original, { force: true });
+      } catch (restoreError) { recovery.push(lastLine(restoreError)); }
+    }
+    if (recovery.length) throw new Error(`${lastLine(error)}；恢复旧证书失败：${recovery.join('；')}`, { cause: error });
+    throw error;
+  } finally { await fs.rm(stage, { recursive: true, force: true }); }
   const { expires } = await certificateStatus();
   console.log(`已生成新的本机证书，有效期至 ${new Date(expires).toLocaleDateString('zh-CN')}；旧证书移至 ${retired}。`);
   await untrustCertificate(path.join(retired, 'localhost.crt'));
@@ -300,9 +332,8 @@ async function replaceCertificate() {
 async function renewCertificate() {
   if (!await exists(recordFile)) throw new Error('请先运行 Install.command。');
   const running = Boolean(await serviceRecord() || launchAgentLoaded());
-  if (running) await stop();
-  await replaceCertificate();
-  if (running) await start();
+  await replaceCertificate(running);
+  if (running) await start({ trust: false });
   else console.log('需要使用时运行 Start.command。');
 }
 // PowerPoint loads the pane only over HTTPS that macOS trusts. With the user's consent the installer
@@ -463,10 +494,13 @@ async function install() {
   }
   const originalPriors = new Map((existingRecord?.registrations || []).map(item => [item.host, item.prior]));
   const powerPointManifestChanged = planned.some(item => item.host === 'powerpoint' && item.before !== null && item.before !== item.value);
-
-  if (existingRecord && (await serviceRecord() || launchAgentLoaded())) {
-    await stop();
-  }
+  let previousService = null;
+  let wroteLaunchAgent = false;
+  const priorAgentFile = existingRecord ? await fs.lstat(launchAgentFile).catch(error => {
+    if (error.code !== 'ENOENT') throw error;
+    return null;
+  }) : null;
+  const priorLaunchAgent = priorAgentFile?.isFile() ? await fs.readFile(launchAgentFile) : null;
 
   await fs.mkdir(state, { recursive: true, mode: 0o700 });
   const stage = `${application}.install-${randomUUID()}`;
@@ -475,7 +509,12 @@ async function install() {
   let moved = false;
   let previousApp = null;
   let previousRecordBackup = null;
+  let preserveActiveInstall = false;
   try {
+    if (existingRecord) {
+      const running = await serviceRecord() ? 'detached' : launchAgentLoaded() ? 'launchAgent' : null;
+      if (running) { await stop(); previousService = running; }
+    }
     await fs.cp(root, stage, { recursive: true, errorOnExist: true, force: false });
     await certificate();
     if (existingRecord && await exists(application)) {
@@ -498,20 +537,30 @@ async function install() {
       : installed;
     await atomic(recordFile, JSON.stringify({ application, version: incomingVersion, registrations: savedRegistrations, launchAgent: launchAgentFile }, null, 2));
     await writeLaunchAgent();
-    console.log((existingRecord ? `SlideSCI 已升级到 ${incomingVersion}。注册宿主：` : 'SlideSCI 已安装。注册宿主：') + installed.map(item => item.host).join('、'));
-    if (previousApp) console.log(`旧版本程序已备份至：${previousApp}`);
+    wroteLaunchAgent = true;
     if (installed.some(item => item.host === 'powerpoint')) await trustCertificate();
-    if (powerPointManifestChanged) await clearWefCache(activeHosts);
     if (launchctlAvailable()) {
       try {
         await start();
-        console.log('已配置登录静默自启，重启电脑后无需手动运行 Start.command；保存工作并重开演示软件即可使用。');
       } catch (error) {
+        if (previousService) {
+          if (launchAgentLoaded()) {
+            try { await stop(); }
+            catch (stopError) {
+              preserveActiveInstall = true;
+              throw new Error(`${lastLine(error)}；新版服务未能停止，已保留当前安装：${lastLine(stopError)}`, { cause: error });
+            }
+          }
+          throw error;
+        }
         console.log('自动启动后台服务失败（稍后可手动运行 Start.command）：' + lastLine(error));
       }
     } else {
       console.log('已生成登录自启配置（隔离测试目录未向系统 launchd 注册）。');
     }
+    if (powerPointManifestChanged) await clearWefCache(activeHosts);
+    console.log((existingRecord ? `SlideSCI 已升级到 ${incomingVersion}。注册宿主：` : 'SlideSCI 已安装。注册宿主：') + installed.map(item => item.host).join('、'));
+    if (previousApp) console.log(`旧版本程序已备份至：${previousApp}`);
     if (installed.some(item => item.host === 'powerpoint')) {
       console.log('PowerPoint 启用位置：开始 → 加载项 → 更多加载项 → 开发人员加载项 → 双击 SlideSCI Mac。');
     }
@@ -519,14 +568,35 @@ async function install() {
       console.log(`提醒：请保存工作并 Cmd+Q 完全退出 ${activeHosts.join('、')} 后重开，以加载最新插件。`);
     }
   } catch (error) {
-    for (const item of installed.reverse()) await restoreRegistration(item);
-    if (moved) await fs.rename(application, `${application}.failed-${stamp()}`);
+    if (preserveActiveInstall) throw error;
+    const rollbackErrors = [];
+    for (const item of installed.reverse()) {
+      try { await restoreRegistration(item); }
+      catch (rollbackError) { rollbackErrors.push(`加载项注册（${item.host}）：${lastLine(rollbackError)}`); }
+    }
+    if (moved) {
+      try { await fs.rename(application, `${application}.failed-${stamp()}`); }
+      catch (rollbackError) { rollbackErrors.push(`移出失败的程序目录：${lastLine(rollbackError)}`); }
+    }
     if (previousApp && await exists(previousApp) && !await exists(application)) {
-      await fs.rename(previousApp, application);
+      try { await fs.rename(previousApp, application); }
+      catch (rollbackError) { rollbackErrors.push(`恢复旧版程序目录：${lastLine(rollbackError)}`); }
     }
     if (previousRecordBackup && await exists(previousRecordBackup)) {
-      await atomic(recordFile, await fs.readFile(previousRecordBackup, 'utf8'));
+      try { await atomic(recordFile, await fs.readFile(previousRecordBackup, 'utf8')); }
+      catch (rollbackError) { rollbackErrors.push(`恢复安装记录：${lastLine(rollbackError)}`); }
     }
+    if (wroteLaunchAgent && existingRecord) {
+      try {
+        if (priorLaunchAgent) await atomic(launchAgentFile, priorLaunchAgent, 0o644);
+        else await fs.rm(launchAgentFile, { force: true });
+      } catch (rollbackError) { rollbackErrors.push(`恢复登录自启配置：${lastLine(rollbackError)}`); }
+    }
+    if (previousService) {
+      try { await start({ launchAgent: previousService === 'launchAgent', trust: false }); console.log('已恢复升级前正在运行的 SlideSCI 后台服务。'); }
+      catch (rollbackError) { rollbackErrors.push(`重新启动后台服务：${lastLine(rollbackError)}`); }
+    }
+    if (rollbackErrors.length) throw new Error(`${error.message}；回滚未完全完成：${rollbackErrors.join('；')}`);
     throw error;
   } finally { await fs.rm(stage, { recursive: true, force: true }); }
 }

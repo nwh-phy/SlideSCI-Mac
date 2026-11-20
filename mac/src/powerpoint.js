@@ -84,6 +84,13 @@ export async function connectPowerPoint(services) {
     }
     return { indices, slideIndex };
   }
+  function targetSlideIndex(presentation, slides, target) {
+    const index = slides.items.findIndex(slide => String(slide.id) === String(target.slideId));
+    if (String(presentation.id) !== String(target.presentationId) || index < 0) {
+      throw new Error('找不到操作开始时的演示文稿或幻灯片。');
+    }
+    return index;
+  }
   async function quick(options = {}) {
     return readPowerPoint(async context => {
       const presentation = context.presentation;
@@ -120,9 +127,10 @@ export async function connectPowerPoint(services) {
         slideCount: count.value, slides: options.slides === false ? [] : slides.items.map((slide, index) => ({ id: slide.id, index })) };
     });
   }
-  async function readSlideTree(context, slideIndex, load = geometryShapeLoad, withZOrder = false) {
+  async function readSlideTree(context, slideIndex, load = geometryShapeLoad, withZOrder = false, withTags = false, slide) {
     const shapes = [];
-    let level = [{ collection: context.presentation.slides.getItemAt(slideIndex).shapes, path: [], output: shapes }];
+    const tagged = withTags ? [] : null;
+    let level = [{ collection: (slide || context.presentation.slides.getItemAt(slideIndex)).shapes, path: [], output: shapes }];
     while (level.length) {
       for (const entry of level) entry.collection.load(load);
       await context.sync();
@@ -136,6 +144,11 @@ export async function connectPowerPoint(services) {
             left: shape.left, top: shape.top, width: shape.width, height: shape.height,
             rotation: shape.rotation, name: shape.name, type: shapeTypes[nativeType] || 'shape' };
           if (withZOrder) model.zOrder = Number(shape.zOrderPosition);
+          if (tagged) {
+            const tags = shape.tags;
+            tags.load('key,value');
+            tagged.push([model, tags]);
+          }
           if (entry.parentId !== undefined) model.parentId = entry.parentId;
           entry.output.push(model);
           if (nativeType === 'Group') {
@@ -145,6 +158,10 @@ export async function connectPowerPoint(services) {
         }
       }
       level = next;
+    }
+    if (tagged?.length) {
+      await context.sync();
+      for (const [model, tags] of tagged) model.tags = Object.fromEntries(tags.items.map(({ key, value }) => [key, value]));
     }
     return shapes;
   }
@@ -174,12 +191,17 @@ export async function connectPowerPoint(services) {
       presentation.pageSetup.load('slideWidth,slideHeight');
       await context.sync();
       if (!slides.items.length) throw new Error('请先在当前演示文稿中添加幻灯片。');
-      const { indices, slideIndex } = await activeSlideIndex(slides, selectedSlides);
+      const active = await activeSlideIndex(slides, selectedSlides);
+      const { indices } = active;
+      const slideIndex = options.target ? targetSlideIndex(presentation, slides, options.target) : active.slideIndex;
       const selectionIds = selection.items.map(shape => String(shape.id));
       const wanted = new Set([...selectionIds, ...extraIds.map(String)]);
       let shapes = [];
-      if (options.scope === 'slide') shapes = await readSlideTree(context, slideIndex);
-      else if (wanted.size) shapes = selectSubtrees(await readSlideTree(context, slideIndex), wanted);
+      if (options.scope === 'slide' || wanted.size) {
+        const slide = options.target ? slides.getItem(String(options.target.slideId)) : undefined;
+        const tree = await readSlideTree(context, slideIndex, geometryShapeLoad, false, options.tags === true, slide);
+        shapes = options.scope === 'slide' ? tree : selectSubtrees(tree, wanted);
+      }
       if (options.textMeta) {
         const placeholders = flatten(shapes).filter(shape => shape.nativeType === 'Placeholder');
         for (const shape of placeholders) {
@@ -261,21 +283,29 @@ export async function connectPowerPoint(services) {
     if (font.superscript !== undefined) target.superscript = Boolean(font.superscript);
     if (font.allCaps !== undefined) target.allCaps = Boolean(font.allCaps);
   }
-  async function applySimpleOffice(commands, readback = true) {
+  async function applySimpleOffice(commands, readback = true, target) {
     const applied = await PowerPoint.run(async context => {
       const slides = context.presentation.slides;
       const selectedSlides = context.presentation.getSelectedSlides();
       slides.load('items/id');
       selectedSlides.load('items/id');
+      if (target) context.presentation.load('id');
       await context.sync();
       if (!slides.items.length) throw new Error('请先在当前演示文稿中添加幻灯片。');
       const indices = selectedSlides.items.map(slide => slides.items.findIndex(item => item.id === slide.id));
-      if (indices.length > 1) return false;
-      const slideIndex = indices[0] ?? 0;
-      const slide = slides.getItemAt(slideIndex);
+      if (!target && indices.length > 1) return false;
+      const slideIndex = target ? targetSlideIndex(context.presentation, slides, target) : indices[0] ?? 0;
+      if (target && commands.some(command => ['insertText', 'group', 'select'].includes(command.op))
+        && (indices.length !== 1 || indices[0] !== slideIndex)) throw new Error('请返回开始操作时的幻灯片。');
+      const slide = target ? slides.getItem(String(target.slideId)) : slides.getItemAt(slideIndex);
       const needsLookup = commands.some(command => command.op === 'update' || command.op === 'delete');
-      const tree = needsLookup ? await readSlideTree(context, slideIndex) : [];
+      const tree = needsLookup ? await readSlideTree(context, slideIndex, geometryShapeLoad, false, false, slide) : [];
       const byId = new Map(flatten(tree).map(shape => [String(shape.id), shape]));
+      function targetShape(model) {
+        if (!target) return officeShape(context, model);
+        if (!model.parentId) return slide.shapes.getItem(model.id);
+        return targetShape(byId.get(String(model.parentId))).group.shapes.getItem(model.id);
+      }
       for (const command of commands) {
         if (command.op === 'insertText') {
           const created = slide.shapes.addTextBox(String(command.text ?? ''), {
@@ -313,7 +343,17 @@ export async function connectPowerPoint(services) {
           const ids = (command.ids || []).map(String);
           slide.setSelectedShapes(ids);
           await context.sync();
-          const grouped = context.presentation.getSelectedShapes().group();
+          const selection = context.presentation.getSelectedShapes();
+          if (target) {
+            selectedSlides.load('items/id');
+            selection.load('items/id');
+            await context.sync();
+            if (selectedSlides.items.length !== 1 || String(selectedSlides.items[0].id) !== String(target.slideId)
+              || selection.items.length !== ids.length || selection.items.some(shape => !ids.includes(String(shape.id)))) {
+              throw new Error('编组前选区已变化，请返回原幻灯片重试。');
+            }
+          }
+          const grouped = selection.group();
           if (command.name !== undefined) grouped.name = String(command.name);
           metadata(grouped, command);
         } else if (command.op === 'delete') {
@@ -325,7 +365,7 @@ export async function connectPowerPoint(services) {
           for (const id of ids) {
             const found = byId.get(id);
             if (!found) return false;
-            if (!insideSelected(found)) officeShape(context, found).delete();
+            if (!insideSelected(found)) targetShape(found).delete();
           }
         } else if (command.op === 'select') {
           const ids = (command.ids || (command.id !== undefined ? [command.id] : [])).map(String);
@@ -694,11 +734,8 @@ export async function connectPowerPoint(services) {
   }
   function onSelectionEvent() {
     if (stopped || !listeners.size || isHidden()) return;
-    if (hasContentListener()) {
-      if (!pending) schedulePoll(50);
-      return;
-    }
     emit('selection');
+    if (hasContentListener() && !pending) schedulePoll(50);
   }
   function removeSelectionEvent(force = false) {
     if (!force && !selectionSubscribed) return;
@@ -799,9 +836,10 @@ export async function connectPowerPoint(services) {
     if (pending) { schedulePoll(1500); return; }
     try {
       const cheap = await serial(surfaceFingerprint);
-      if (surface === undefined) surface = cheap;
-      else if (cheap.content !== surface.content) { surface = cheap; emit('content'); }
-      else if (cheap.selection !== surface.selection) { surface = cheap; emit('selection'); }
+      const previous = surface;
+      surface = cheap;
+      if (previous && cheap.content !== previous.content) emit('content');
+      else if (previous && !selectionEventSupported && cheap.selection !== previous.selection) emit('selection');
     } catch (error) { await services?.reportError?.(error, { operation: 'powerpoint-watch' }); }
     schedulePoll(1500);
   }
@@ -827,6 +865,30 @@ export async function connectPowerPoint(services) {
         if (geometryUpdate(command)) { moved = true; movedIds.add(String(command.id)); }
         else if (command.op !== 'select') rich = true;
         if (command.slideIndex !== undefined) rich = true;
+      }
+      // Roll back newly created top-level groups without exporting the slide or using AppleScript.
+      if (options.readback === false && commands.every(command => command.op === 'ungroup' && command.slideIndex === undefined)) {
+        await PowerPoint.run(async context => {
+          const presentation = context.presentation;
+          const slides = options.target ? presentation.slides : presentation.getSelectedSlides();
+          slides.load('items/id');
+          if (options.target) presentation.load('id');
+          await context.sync();
+          if (!options.target && slides.items.length !== 1) throw new Error('请先选中要取消编组的幻灯片。');
+          if (options.target) targetSlideIndex(presentation, slides, options.target);
+          const slide = options.target ? slides.getItem(String(options.target.slideId)) : slides.items[0];
+          const shapes = slide.shapes;
+          for (const { id } of commands) shapes.getItem(String(id)).group.ungroup();
+          await context.sync();
+        });
+        emit();
+        return { applied: commands.length };
+      }
+      if (options.target) {
+        if (!isSimpleOfficeBatch(commands)) throw new Error('该命令不能绑定到指定幻灯片。');
+        const model = await applySimpleOffice(commands, options.readback !== false, options.target);
+        if (!model) throw new Error('原幻灯片上的对象已经变化，请重新选择后重试。');
+        return model;
       }
       if (options.readback === false && commands.every(command => command.op === 'update'
         && command.slideIndex === undefined && Object.keys(command.properties || {}).every(key => directProperties.has(key)))) {
@@ -880,9 +942,10 @@ export async function connectPowerPoint(services) {
       return fragment;
     }),
     insertFragment: (fragment, options = {}) => serial(async () => {
-      const source = await snapshot();
-      await native('insertFragment', { fragment, options, context: source.context });
-      const result = (await snapshot()).context;
+      const source = options.target ? { context: await geometryContext({ target: options.target }) } : await snapshot();
+      await native('insertFragment', { fragment, options, context: source.context,
+        ...(options.target ? { slideId: source.context.slideId, documentUrl: Office.context.document.url } : {}) });
+      const result = options.readback === false ? undefined : (await snapshot()).context;
       emit(); return result;
     }),
     rasterizeImage: (id, options = {}) => serial(async () => {
