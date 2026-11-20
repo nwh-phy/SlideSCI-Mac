@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, chmod, symlink } from 'node:fs/promises';
 import { X509Certificate } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -125,5 +125,139 @@ test('an isolated profile never asks to change the signed-in user\'s trust setti
     assert.match(output, /PowerPoint 需要信任本机证书/);
     assert.doesNotMatch(output, /授权窗口中输入/);
     assert.deepEqual(await calls(), [], 'the stand-in tool is not used, and the real one only checks trust');
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+async function makePackageFixture(directory, { version, manifestXml }) {
+  await mkdir(path.join(directory, 'runtime/bin'), { recursive: true });
+  await mkdir(path.join(directory, 'mac/scripts'), { recursive: true });
+  await mkdir(path.join(directory, 'mac/office'), { recursive: true });
+  await writeFile(path.join(directory, 'BUILD-INFO.json'), JSON.stringify({ version }, null, 2));
+  await writeFile(path.join(directory, 'runtime/bin/node'), '#!/bin/sh\nexit 0\n');
+  await chmod(path.join(directory, 'runtime/bin/node'), 0o755);
+  await writeFile(path.join(directory, 'mac/scripts/distribution.mjs'), await readFile(installer, 'utf8'));
+  await writeFile(path.join(directory, 'mac/office/manifest.xml'), manifestXml);
+  await symlink(path.resolve(path.dirname(installer), '../node_modules'), path.join(directory, 'mac/node_modules'));
+}
+
+function makeFakeLaunchctl() {
+  return `#!/usr/bin/env node
+const fs = require('node:fs'), path = require('node:path');
+const state = process.env.FAKE_LAUNCHCTL_STATE, args = process.argv.slice(2);
+fs.appendFileSync(path.join(state, 'calls.log'), args.join(' ') + '\\n');
+const loaded = path.join(state, 'loaded');
+if (args[0] === 'print') process.exit(fs.existsSync(loaded) ? 0 : 113);
+if (args[0] === 'bootstrap') { fs.writeFileSync(loaded, args.at(-1)); process.exit(0); }
+if (args[0] === 'bootout') { if (!fs.existsSync(loaded)) process.exit(3); fs.rmSync(loaded); process.exit(0); }
+process.exit(2);
+`;
+}
+
+test('install upgrades in place, stops old service, reuses trusted cert, clears Wef cache and preserves original prior on uninstall', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'slidesci-upgrade-'));
+  const wefDir = path.join(home, 'Library/Containers/com.microsoft.Powerpoint/Data/Documents/wef');
+  const wefCache = path.join(home, 'Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef');
+  const securityState = path.join(home, 'security');
+  const launchState = path.join(home, 'launchctl');
+  const fakeSecurityTool = path.join(home, 'fake-security');
+  const fakeLaunchctl = path.join(home, 'fake-launchctl');
+  const v1Pkg = path.join(home, 'pkg-v1');
+  const v2Pkg = path.join(home, 'pkg-v2');
+  const originalPrior = '<OfficeApp><Version>0.9.0.0</Version></OfficeApp>';
+  const v1Manifest = '<OfficeApp><Version>1.1.2.0</Version></OfficeApp>';
+  const v2Manifest = '<OfficeApp><Version>1.2.0.0</Version></OfficeApp>';
+
+  try {
+    for (const dir of [wefDir, wefCache, securityState, launchState]) await mkdir(dir, { recursive: true });
+    await writeFile(path.join(wefDir, 'SlideSCI-Mac.xml'), originalPrior);
+    await writeFile(path.join(wefCache, 'stale-cache.json'), '{}');
+    await writeFile(fakeSecurityTool, fakeSecurity);
+    await chmod(fakeSecurityTool, 0o755);
+    await writeFile(fakeLaunchctl, makeFakeLaunchctl());
+    await chmod(fakeLaunchctl, 0o755);
+    await makePackageFixture(v1Pkg, { version: '0.1.2', manifestXml: v1Manifest });
+    await makePackageFixture(v2Pkg, { version: '0.2.0', manifestXml: v2Manifest });
+
+    const env = {
+      ...process.env,
+      SLIDESCI_SECURITY_TOOL: fakeSecurityTool,
+      FAKE_SECURITY_STATE: securityState,
+      SLIDESCI_LAUNCHCTL: fakeLaunchctl,
+      FAKE_LAUNCHCTL_STATE: launchState,
+      SLIDESCI_RUNNING_HOSTS: ''
+    };
+    const runPkg = (pkg, cmd, extra = []) => execFileSync(process.execPath, [path.join(pkg, 'mac/scripts/distribution.mjs'), cmd, '--profile', home, ...extra], {
+      env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    runPkg(v1Pkg, 'install', ['--trust-certificate', 'yes', '--clear-wef-cache', 'no']);
+    assert.equal(await readFile(path.join(wefDir, 'SlideSCI-Mac.xml'), 'utf8'), v1Manifest);
+
+    const upgradeOut = runPkg(v2Pkg, 'install', ['--upgrade', 'yes', '--trust-certificate', 'no']);
+    assert.match(upgradeOut, /SlideSCI 已升级到 0\.2\.0/);
+    assert.match(upgradeOut, /已清理 PowerPoint 加载项缓存（Wef）/);
+    assert.match(upgradeOut, /SlideSCI-Mac\.previous-/);
+
+    const appSupport = await readdir(path.join(home, 'Library/Application Support'));
+    assert.ok(appSupport.some(name => name.startsWith('SlideSCI-Mac.previous-')), 'old install directory is backed up');
+    assert.equal(await readFile(path.join(home, 'Library/Application Support/SlideSCI-Mac/BUILD-INFO.json'), 'utf8').then(t => JSON.parse(t).version), '0.2.0');
+    assert.equal(await readFile(path.join(wefDir, 'SlideSCI-Mac.xml'), 'utf8'), v2Manifest);
+    assert.equal(await readFile(path.join(wefCache, 'stale-cache.json'), 'utf8').then(() => true, () => false), false, 'Wef cache cleared on upgrade when PowerPoint is closed');
+
+    const secCalls = (await readFile(path.join(securityState, 'calls.log'), 'utf8')).trim().split('\n');
+    assert.equal(secCalls.filter(line => line.startsWith('add-trusted-cert')).length, 1, 'upgrade reuses existing trusted certificate without prompting again');
+
+    const launchCalls = (await readFile(path.join(launchState, 'calls.log'), 'utf8')).trim().split('\n');
+    assert.deepEqual(launchCalls.filter(line => line.startsWith('boot')), [
+      'bootstrap gui/' + process.getuid() + ' ' + path.join(home, 'Library/LaunchAgents/com.slidesci.mac.service.plist'),
+      'bootout gui/' + process.getuid() + '/com.slidesci.mac.service',
+      'bootstrap gui/' + process.getuid() + ' ' + path.join(home, 'Library/LaunchAgents/com.slidesci.mac.service.plist')
+    ]);
+
+    runPkg(v2Pkg, 'uninstall');
+    assert.equal(await readFile(path.join(wefDir, 'SlideSCI-Mac.xml'), 'utf8'), originalPrior, 'uninstall after upgrade still restores original pre-SlideSCI manifest');
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('upgrade protects running PowerPoint Wef cache, respects declined upgrade and rejects tampered registrations', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'slidesci-upgrade-guard-'));
+  const wefDir = path.join(home, 'Library/Containers/com.microsoft.Powerpoint/Data/Documents/wef');
+  const wefCache = path.join(home, 'Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef');
+  const securityState = path.join(home, 'security');
+  const launchState = path.join(home, 'launchctl');
+  const fakeSecurityTool = path.join(home, 'fake-security');
+  const fakeLaunchctl = path.join(home, 'fake-launchctl');
+  const v1Pkg = path.join(home, 'pkg-v1');
+  const v2Pkg = path.join(home, 'pkg-v2');
+  const v1Manifest = '<OfficeApp><Version>1.1.2.0</Version></OfficeApp>';
+  const v2Manifest = '<OfficeApp><Version>1.2.0.0</Version></OfficeApp>';
+
+  try {
+    for (const dir of [wefDir, wefCache, securityState, launchState]) await mkdir(dir, { recursive: true });
+    await writeFile(path.join(wefCache, 'stale-cache.json'), '{}');
+    await writeFile(fakeSecurityTool, fakeSecurity);
+    await chmod(fakeSecurityTool, 0o755);
+    await writeFile(fakeLaunchctl, makeFakeLaunchctl());
+    await chmod(fakeLaunchctl, 0o755);
+    await makePackageFixture(v1Pkg, { version: '0.1.2', manifestXml: v1Manifest });
+    await makePackageFixture(v2Pkg, { version: '0.2.0', manifestXml: v2Manifest });
+
+    const runPkg = (pkg, extra = [], running = '') => execFileSync(process.execPath, [path.join(pkg, 'mac/scripts/distribution.mjs'), 'install', '--profile', home, ...extra], {
+      env: { ...process.env, SLIDESCI_SECURITY_TOOL: fakeSecurityTool, FAKE_SECURITY_STATE: securityState, SLIDESCI_LAUNCHCTL: fakeLaunchctl, FAKE_LAUNCHCTL_STATE: launchState, SLIDESCI_RUNNING_HOSTS: running },
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    runPkg(v1Pkg, ['--trust-certificate', 'no', '--clear-wef-cache', 'no']);
+
+    assert.throws(() => runPkg(v2Pkg, ['--upgrade', 'no', '--trust-certificate', 'no']), /已取消原地升级/);
+    assert.equal(JSON.parse(await readFile(path.join(home, 'Library/Application Support/SlideSCI-Mac/BUILD-INFO.json'), 'utf8')).version, '0.1.2');
+
+    const runningOut = runPkg(v2Pkg, ['--upgrade', 'yes', '--trust-certificate', 'no'], 'PowerPoint');
+    assert.match(runningOut, /检测到 PowerPoint 正在运行/);
+    assert.match(runningOut, /未自动清理 Wef 加载项缓存/);
+    assert.equal(await readFile(path.join(wefCache, 'stale-cache.json'), 'utf8'), '{}', 'Wef cache is kept while PowerPoint is running');
+
+    await writeFile(path.join(wefDir, 'SlideSCI-Mac.xml'), '<OfficeApp><Tampered/></OfficeApp>');
+    assert.throws(() => runPkg(v2Pkg, ['--upgrade', 'yes', '--trust-certificate', 'no']), /PowerPoint 注册已被另行修改/);
   } finally { await rm(home, { recursive: true, force: true }); }
 });

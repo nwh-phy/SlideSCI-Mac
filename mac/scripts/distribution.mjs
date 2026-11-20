@@ -318,8 +318,23 @@ function certificateTrusted(file) {
   try { execFileSync(securityTool, ['verify-cert', '-c', file, '-p', 'ssl', '-n', 'localhost', '-L', '-q'], { stdio: 'ignore' }); return true; }
   catch { return false; }
 }
-async function consent(question) {
-  const choice = option('--trust-certificate', null);
+function runningHosts() {
+  if (process.env.SLIDESCI_RUNNING_HOSTS !== undefined) {
+    return process.env.SLIDESCI_RUNNING_HOSTS.split(',').map(item => item.trim()).filter(Boolean);
+  }
+  if (profile !== path.resolve(os.homedir())) return [];
+  try {
+    const comms = run('/bin/ps', ['-axo', 'comm=']);
+    const hosts = [];
+    if (/Microsoft PowerPoint/i.test(comms)) hosts.push('PowerPoint');
+    if (/wpsoffice/i.test(comms)) hosts.push('WPS');
+    return hosts;
+  } catch {
+    return [];
+  }
+}
+async function consent(question, optionName = '--trust-certificate') {
+  const choice = option(optionName, null);
   if (choice === 'yes') return true;
   if (choice === 'no' || !process.stdin.isTTY) return false;
   const { createInterface } = await import('node:readline/promises');
@@ -404,23 +419,69 @@ async function restoreRegistration(item, checkOnly = false) {
     await atomic(item.target, serialize(document));
   }
 }
+async function clearWefCache(activeHosts) {
+  const wefCache = path.join(profile, 'Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef');
+  if (option('--clear-wef-cache', 'yes') === 'no' || !await exists(wefCache)) return;
+  if (activeHosts.includes('PowerPoint')) {
+    console.log('PowerPoint 正在运行，未自动清理 Wef 加载项缓存。若重开 PowerPoint 后在“开发人员加载项”中看不到新版 SlideSCI Mac，请先 Cmd+Q 完全退出 PowerPoint 并执行：');
+    console.log('rm -rf ~/Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef');
+    return;
+  }
+  try {
+    await fs.rm(wefCache, { recursive: true, force: true });
+    console.log('已清理 PowerPoint 加载项缓存（Wef），重开 PowerPoint 后将加载新版功能区。');
+  } catch (error) {
+    console.log(`未能自动清理 PowerPoint 加载项缓存（${lastLine(error)}）。若重开后仍显示旧版或找不到插件，请完全退出 PowerPoint 后执行：`);
+    console.log('rm -rf ~/Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef');
+  }
+}
 async function install() {
   if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('此安装包仅适用于 Apple Silicon Mac。Intel Mac 请使用源码开发流程；尚未实机验证。');
   if (path.resolve(root) === application) throw new Error('请从解压后的发行目录运行安装器。');
   if (!await exists(path.join(root, 'BUILD-INFO.json')) || !await exists(path.join(root, 'runtime/bin/node'))) throw new Error('请先构建并解压发行 ZIP，再运行 Install.command。');
-  if (await exists(recordFile)) throw new Error('已有本安装器版本，请先运行旧版本的 Uninstall.command；素材和设置会保留。');
-  if (await exists(application)) throw new Error('目标目录已有未登记内容，未覆盖。');
-  if (await serviceRecord() || launchAgentLoaded()) throw new Error('SlideSCI 服务仍在运行，请先运行 Stop.command。');
+
+  const incomingVersion = (await json(path.join(root, 'BUILD-INFO.json'))).version;
+  const existingRecord = await exists(recordFile) ? await json(recordFile) : null;
+  if (existingRecord) {
+    if (existingRecord.application !== application) throw new Error('已有安装记录的路径不匹配，停止升级。');
+    const oldVersion = existingRecord.version || '未知版本';
+    if (!await consent(`检测到已安装的 SlideSCI ${oldVersion}，是否原地升级到 ${incomingVersion}？（将自动停止旧服务，保留素材、设置与已信任证书）`, '--upgrade')) {
+      throw new Error('已取消原地升级；旧版本保持不变（非交互模式可传 --upgrade yes）。');
+    }
+    for (const item of existingRecord.registrations || []) await restoreRegistration(item, true);
+  } else {
+    if (await exists(application)) throw new Error('目标目录已有未登记内容，未覆盖。');
+    if (await serviceRecord() || launchAgentLoaded()) throw new Error('SlideSCI 服务仍在运行，请先运行 Stop.command。');
+  }
+
   const planned = await registrations();
   if (!planned.length) throw new Error('尚未找到 PowerPoint 或 WPS 的容器。请先安装并打开宿主一次。');
+  const plannedNames = new Set(planned.map(item => item.host === 'powerpoint' ? 'PowerPoint' : 'WPS'));
+  const activeHosts = runningHosts().filter(name => plannedNames.has(name));
+  if (activeHosts.length) {
+    console.log(`检测到 ${activeHosts.join('、')} 正在运行：安装/升级完成后请先保存工作并完全退出（Cmd+Q）再重开，新加载项才会生效。`);
+  }
+  const originalPriors = new Map((existingRecord?.registrations || []).map(item => [item.host, item.prior]));
+  const powerPointManifestChanged = planned.some(item => item.host === 'powerpoint' && item.before !== null && item.before !== item.value);
+
+  if (existingRecord && (await serviceRecord() || launchAgentLoaded())) {
+    await stop();
+  }
+
   await fs.mkdir(state, { recursive: true, mode: 0o700 });
   const stage = `${application}.install-${randomUUID()}`;
   await fs.mkdir(path.dirname(application), { recursive: true, mode: 0o700 });
   const installed = [];
   let moved = false;
+  let previousApp = null;
+  let previousRecordBackup = null;
   try {
     await fs.cp(root, stage, { recursive: true, errorOnExist: true, force: false });
     await certificate();
+    if (existingRecord && await exists(application)) {
+      previousApp = `${application}.previous-${stamp()}`;
+      await fs.rename(application, previousApp);
+    }
     await fs.rename(stage, application); moved = true;
     for (const { before, value, ...item } of planned) {
       const current = await exists(item.target) ? await fs.readFile(item.target, 'utf8') : null;
@@ -428,10 +489,19 @@ async function install() {
       if (before !== null) await atomic(path.join(state, `backups/${stamp()}-${item.host}.xml`), before);
       await atomic(item.target, value); installed.push(item);
     }
-    await atomic(recordFile, JSON.stringify({ application, version: (await json(path.join(application, 'BUILD-INFO.json'))).version, registrations: installed, launchAgent: launchAgentFile }, null, 2));
+    if (existingRecord) {
+      previousRecordBackup = path.join(state, `backups/${stamp()}-installation.json`);
+      await atomic(previousRecordBackup, await fs.readFile(recordFile, 'utf8'));
+    }
+    const savedRegistrations = existingRecord
+      ? installed.map(item => originalPriors.has(item.host) ? { ...item, prior: originalPriors.get(item.host) } : item)
+      : installed;
+    await atomic(recordFile, JSON.stringify({ application, version: incomingVersion, registrations: savedRegistrations, launchAgent: launchAgentFile }, null, 2));
     await writeLaunchAgent();
-    console.log('SlideSCI 已安装。注册宿主：' + installed.map(item => item.host).join('、'));
+    console.log((existingRecord ? `SlideSCI 已升级到 ${incomingVersion}。注册宿主：` : 'SlideSCI 已安装。注册宿主：') + installed.map(item => item.host).join('、'));
+    if (previousApp) console.log(`旧版本程序已备份至：${previousApp}`);
     if (installed.some(item => item.host === 'powerpoint')) await trustCertificate();
+    if (powerPointManifestChanged) await clearWefCache(activeHosts);
     if (launchctlAvailable()) {
       try {
         await start();
@@ -442,9 +512,21 @@ async function install() {
     } else {
       console.log('已生成登录自启配置（隔离测试目录未向系统 launchd 注册）。');
     }
+    if (installed.some(item => item.host === 'powerpoint')) {
+      console.log('PowerPoint 启用位置：开始 → 加载项 → 更多加载项 → 开发人员加载项 → 双击 SlideSCI Mac。');
+    }
+    if (activeHosts.length) {
+      console.log(`提醒：请保存工作并 Cmd+Q 完全退出 ${activeHosts.join('、')} 后重开，以加载最新插件。`);
+    }
   } catch (error) {
     for (const item of installed.reverse()) await restoreRegistration(item);
     if (moved) await fs.rename(application, `${application}.failed-${stamp()}`);
+    if (previousApp && await exists(previousApp) && !await exists(application)) {
+      await fs.rename(previousApp, application);
+    }
+    if (previousRecordBackup && await exists(previousRecordBackup)) {
+      await atomic(recordFile, await fs.readFile(previousRecordBackup, 'utf8'));
+    }
     throw error;
   } finally { await fs.rm(stage, { recursive: true, force: true }); }
 }
@@ -541,5 +623,5 @@ try {
   else if (action === 'stop') await stop();
   else if (action === 'uninstall') await uninstall();
   else if (action === 'renew-certificate') await renewCertificate();
-  else throw new Error('使用：distribution.mjs build|install|start|stop|uninstall|renew-certificate [--profile 隔离测试目录] [--output 构建目录] [--trust-certificate yes|no]');
+  else throw new Error('使用：distribution.mjs build|install|start|stop|uninstall|renew-certificate [--profile 隔离测试目录] [--output 构建目录] [--trust-certificate yes|no] [--upgrade yes|no] [--clear-wef-cache yes|no]');
 } catch (error) { console.error(permissionMessage(error)); process.exitCode = 1; }

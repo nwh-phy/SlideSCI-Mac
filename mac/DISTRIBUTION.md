@@ -8,12 +8,12 @@
 
 ## 安装与启用
 
-1. 先安装并打开需要使用的 WPS 或 PowerPoint 一次，再保存现有工作。安装器只注册已经初始化容器的宿主。
-2. 解压 ZIP，运行 `Install.command`。程序安装到 `~/Library/Application Support/SlideSCI-Mac`，同时写入登录自启配置并启动本机后台服务。已有旧版时先运行旧版本的 `Uninstall.command`，素材和设置会保留。
+1. 先安装并打开需要使用的 WPS 或 PowerPoint 一次，再保存现有工作并完全退出（`Cmd+Q`）。安装器只注册已经初始化容器的宿主。
+2. 解压 ZIP，运行 `Install.command`。程序安装到 `~/Library/Application Support/SlideSCI-Mac`，同时写入登录自启配置并启动本机后台服务。若本机已安装旧版（0.1.x 及以上同路径安装器版本），`Install.command` 支持提示后**原地平滑升级**（自动停止旧服务、备份旧版程序、复用已信任的本地证书免重复输入密码，并在 PowerPoint 未运行且 manifest 有变化时自动清理 Wef 加载项缓存；非交互部署可传 `--upgrade yes`）。素材和设置均保留。
 3. 如需手动启停服务，可运行 `Start.command` 或 `Stop.command`。若提示 3000/3443 端口占用，先结束占用端口的开发服务。
 4. WPS：保存工作并重开 WPS，确认信任 `slidesci-mac-dev`，从顶部 SlideSCI 分组按钮直接选择功能。
 5. PowerPoint：PowerPoint 只通过受 macOS 信任的 HTTPS 加载 SlideSCI。安装时会为本机生成独立的 `localhost` 证书和私钥（有效期 825 天），保存在 `~/Library/Application Support/SlideSCI-Mac-Installer/tls/`，私钥只保存在本机。安装器会询问是否信任该证书（仅用于 `localhost` 的 SSL，不创建 CA）；同意后输入登录密码即完成。证书剩余 30 天内可运行 `RenewCertificate.command` 换新。
-6. 保存工作并重开 PowerPoint，从“开始 → 加载项 → 开发人员加载项”双击 `SlideSCI Mac`。
+6. 保存工作并 `Cmd+Q` 重开 PowerPoint，从“开始 → 加载项 → 更多加载项 → 开发人员加载项”双击 `SlideSCI Mac`。如安装时未退出 PowerPoint 导致升级后功能区仍显示旧版或找不到插件，先 `Cmd+Q` 退出 PowerPoint 并删除 `~/Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef` 后重开即可。
 
 ZIP 和原生辅助程序尚无 Developer ID 签名及 Apple 公证。Gatekeeper 可能阻止首次打开；确认来源后在系统设置“隐私与安全性”中允许该文件即可。
 
