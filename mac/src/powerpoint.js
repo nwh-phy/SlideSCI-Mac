@@ -46,7 +46,8 @@ export async function connectPowerPoint(services) {
       ...(presentationName && action !== 'rasterizeImage' ? { presentationName } : {}) });
   };
   let queue = Promise.resolve(), timer, stopped = false, surface, notifying = false, pending = 0;
-  const listeners = new Set();
+  let selectionSubscribed = false, selectionEventSupported = false, visibilitySubscribed = false;
+  const listeners = new Map();
   function serial(operation) {
     pending++;
     const run = async () => { try { return await operation(); } finally { pending--; } };
@@ -74,14 +75,35 @@ export async function connectPowerPoint(services) {
       else if (value !== undefined && value !== null) shape.tags.add(key, String(value));
     }
   }
-  async function activeSlideIndex(slides, selected) {
+  // Several thumbnails may be selected while the edited shapes sit on one of them. Office.js names
+  // that slide through the selected shapes; AppleScript is only a fallback, and core layout keeps
+  // working on the first selected slide when the local service is unavailable.
+  async function parentSlideIndex(context, slides, selection) {
+    const first = selection?.items?.[0];
+    if (typeof first?.getParentSlideOrNullObject !== 'function') return -1;
+    const parent = first.getParentSlideOrNullObject();
+    parent.load('id');
+    await context.sync();
+    return parent.isNullObject ? -1 : slides.items.findIndex(item => item.id === parent.id);
+  }
+  async function activeSlideIndex(context, slides, selected, selection) {
     const indices = selected.items.map(slide => slides.items.findIndex(item => item.id === slide.id));
     let slideIndex = indices[0] ?? 0;
-    if (indices.length > 1) {
+    if (indices.length <= 1) return { indices, slideIndex };
+    const index = await parentSlideIndex(context, slides, selection);
+    if (index >= 0) return { indices, slideIndex: index };
+    try {
       const active = await native('documentInfo');
       if (indices.includes(active.slideIndex)) slideIndex = active.slideIndex;
-    }
+    } catch { /* The first selected slide stays the target. */ }
     return { indices, slideIndex };
+  }
+  function targetSlideIndex(presentation, slides, target) {
+    const index = slides.items.findIndex(slide => String(slide.id) === String(target.slideId));
+    if (String(presentation.id) !== String(target.presentationId) || index < 0) {
+      throw new Error('找不到操作开始时的演示文稿或幻灯片。');
+    }
+    return index;
   }
   async function quick(options = {}) {
     return readPowerPoint(async context => {
@@ -109,8 +131,16 @@ export async function connectPowerPoint(services) {
         indices = selected.items.map(slide => slide.index);
         slideIndex = indices[0] ?? 0;
         slideId = selected.items[0]?.id ?? firstSlide.id;
+        // Agree with the geometry context, or the live panel would see a slide change on every event.
+        const first = selection.items[0];
+        if (indices.length > 1 && typeof first?.getParentSlideOrNullObject === 'function') {
+          const parent = first.getParentSlideOrNullObject();
+          parent.load('id,index');
+          await context.sync();
+          if (!parent.isNullObject) { slideIndex = parent.index; slideId = parent.id; }
+        }
       } else {
-        ({ indices, slideIndex } = await activeSlideIndex(slides, selected));
+        ({ indices, slideIndex } = await activeSlideIndex(context, slides, selected, selection));
         slideId = slides.items[slideIndex].id;
       }
       return { presentationId: presentation.id, title: title(), slideIndex, slideId,
@@ -119,9 +149,10 @@ export async function connectPowerPoint(services) {
         slideCount: count.value, slides: options.slides === false ? [] : slides.items.map((slide, index) => ({ id: slide.id, index })) };
     });
   }
-  async function readSlideTree(context, slideIndex, load = geometryShapeLoad, withZOrder = false) {
+  async function readSlideTree(context, slideIndex, load = geometryShapeLoad, withZOrder = false, withTags = false, slide) {
     const shapes = [];
-    let level = [{ collection: context.presentation.slides.getItemAt(slideIndex).shapes, path: [], output: shapes }];
+    const tagged = withTags ? [] : null;
+    let level = [{ collection: (slide || context.presentation.slides.getItemAt(slideIndex)).shapes, path: [], output: shapes }];
     while (level.length) {
       for (const entry of level) entry.collection.load(load);
       await context.sync();
@@ -135,6 +166,11 @@ export async function connectPowerPoint(services) {
             left: shape.left, top: shape.top, width: shape.width, height: shape.height,
             rotation: shape.rotation, name: shape.name, type: shapeTypes[nativeType] || 'shape' };
           if (withZOrder) model.zOrder = Number(shape.zOrderPosition);
+          if (tagged) {
+            const tags = shape.tags;
+            tags.load('key,value');
+            tagged.push([model, tags]);
+          }
           if (entry.parentId !== undefined) model.parentId = entry.parentId;
           entry.output.push(model);
           if (nativeType === 'Group') {
@@ -144,6 +180,10 @@ export async function connectPowerPoint(services) {
         }
       }
       level = next;
+    }
+    if (tagged?.length) {
+      await context.sync();
+      for (const [model, tags] of tagged) model.tags = Object.fromEntries(tags.items.map(({ key, value }) => [key, value]));
     }
     return shapes;
   }
@@ -173,22 +213,44 @@ export async function connectPowerPoint(services) {
       presentation.pageSetup.load('slideWidth,slideHeight');
       await context.sync();
       if (!slides.items.length) throw new Error('请先在当前演示文稿中添加幻灯片。');
-      const { indices, slideIndex } = await activeSlideIndex(slides, selectedSlides);
+      // A target names its slide, so the active slide is only looked up when none is given.
+      const active = options.target
+        ? { indices: selectedSlides.items.map(slide => slides.items.findIndex(item => item.id === slide.id)) }
+        : await activeSlideIndex(context, slides, selectedSlides, selection);
+      const { indices } = active;
+      const slideIndex = options.target ? targetSlideIndex(presentation, slides, options.target) : active.slideIndex;
       const selectionIds = selection.items.map(shape => String(shape.id));
       const wanted = new Set([...selectionIds, ...extraIds.map(String)]);
       let shapes = [];
-      if (options.scope === 'slide') shapes = await readSlideTree(context, slideIndex);
-      else if (wanted.size) shapes = selectSubtrees(await readSlideTree(context, slideIndex), wanted);
+      if (options.scope === 'slide' || wanted.size) {
+        const slide = options.target ? slides.getItem(String(options.target.slideId)) : undefined;
+        const tree = await readSlideTree(context, slideIndex, geometryShapeLoad, false, options.tags === true, slide);
+        shapes = options.scope === 'slide' ? tree : selectSubtrees(tree, wanted);
+      }
+      // Text boxes are typed 'text'; placeholders and autoshapes report whether they hold text, so
+      // labels drawn as rectangles or placeholders still count without a full PPTX export.
       if (options.textMeta) {
-        const placeholders = flatten(shapes).filter(shape => shape.nativeType === 'Placeholder');
-        for (const shape of placeholders) {
-          try {
-            const frame = officeShape(context, shape).textFrame;
-            frame.load('hasText');
-            await context.sync();
+        const candidates = flatten(shapes).filter(shape => textTypes.has(shape.nativeType) && shape.nativeType !== 'TextBox');
+        const mark = (shape, frame) => {
+          if (shape.nativeType === 'Placeholder') {
             shape.isPlaceholder = true;
             if (frame.hasText !== undefined) shape.hasTextFrame = true;
-          } catch { /* picture/chart/table placeholder has no text frame */ }
+          }
+          shape.hasText = frame.hasText === true;
+        };
+        const read = shape => { const frame = officeShape(context, shape).textFrame; frame.load('hasText'); return frame; };
+        const frames = [];
+        for (const shape of candidates) {
+          try { frames.push([shape, read(shape)]); } catch { /* no text frame */ }
+        }
+        let batched = !frames.length;
+        if (frames.length) {
+          try { await context.sync(); batched = true; } catch { /* a picture/chart/table placeholder has no text frame */ }
+        }
+        if (batched) for (const [shape, frame] of frames) mark(shape, frame);
+        else for (const [shape] of frames) {
+          try { const frame = read(shape); await context.sync(); mark(shape, frame); }
+          catch { /* this shape has no text frame */ }
         }
       }
       return { presentationId: presentation.id, title: title(), slideId: slides.items[slideIndex].id, slideIndex,
@@ -260,21 +322,35 @@ export async function connectPowerPoint(services) {
     if (font.superscript !== undefined) target.superscript = Boolean(font.superscript);
     if (font.allCaps !== undefined) target.allCaps = Boolean(font.allCaps);
   }
-  async function applySimpleOffice(commands, readback = true) {
+  async function applySimpleOffice(commands, readback = true, target) {
     const applied = await PowerPoint.run(async context => {
       const slides = context.presentation.slides;
       const selectedSlides = context.presentation.getSelectedSlides();
+      const selection = target ? null : context.presentation.getSelectedShapes();
       slides.load('items/id');
       selectedSlides.load('items/id');
+      selection?.load('items/id');
+      if (target) context.presentation.load('id');
       await context.sync();
       if (!slides.items.length) throw new Error('请先在当前演示文稿中添加幻灯片。');
       const indices = selectedSlides.items.map(slide => slides.items.findIndex(item => item.id === slide.id));
-      if (indices.length > 1) return false;
-      const slideIndex = indices[0] ?? 0;
-      const slide = slides.getItemAt(slideIndex);
+      let slideIndex = target ? targetSlideIndex(context.presentation, slides, target) : indices[0] ?? 0;
+      if (!target && indices.length > 1) {
+        // Several thumbnails selected: edit the slide holding the selected shapes, or fall back.
+        slideIndex = await parentSlideIndex(context, slides, selection);
+        if (slideIndex < 0) return false;
+      }
+      if (target && commands.some(command => ['insertText', 'group', 'select'].includes(command.op))
+        && (indices.length !== 1 || indices[0] !== slideIndex)) throw new Error('请返回开始操作时的幻灯片。');
+      const slide = target ? slides.getItem(String(target.slideId)) : slides.getItemAt(slideIndex);
       const needsLookup = commands.some(command => command.op === 'update' || command.op === 'delete');
-      const tree = needsLookup ? await readSlideTree(context, slideIndex) : [];
+      const tree = needsLookup ? await readSlideTree(context, slideIndex, geometryShapeLoad, false, false, slide) : [];
       const byId = new Map(flatten(tree).map(shape => [String(shape.id), shape]));
+      function targetShape(model) {
+        if (!target) return officeShape(context, model);
+        if (!model.parentId) return slide.shapes.getItem(model.id);
+        return targetShape(byId.get(String(model.parentId))).group.shapes.getItem(model.id);
+      }
       for (const command of commands) {
         if (command.op === 'insertText') {
           const created = slide.shapes.addTextBox(String(command.text ?? ''), {
@@ -312,7 +388,17 @@ export async function connectPowerPoint(services) {
           const ids = (command.ids || []).map(String);
           slide.setSelectedShapes(ids);
           await context.sync();
-          const grouped = context.presentation.getSelectedShapes().group();
+          const selection = context.presentation.getSelectedShapes();
+          if (target) {
+            selectedSlides.load('items/id');
+            selection.load('items/id');
+            await context.sync();
+            if (selectedSlides.items.length !== 1 || String(selectedSlides.items[0].id) !== String(target.slideId)
+              || selection.items.length !== ids.length || selection.items.some(shape => !ids.includes(String(shape.id)))) {
+              throw new Error('编组前选区已变化，请返回原幻灯片重试。');
+            }
+          }
+          const grouped = selection.group();
           if (command.name !== undefined) grouped.name = String(command.name);
           metadata(grouped, command);
         } else if (command.op === 'delete') {
@@ -324,7 +410,7 @@ export async function connectPowerPoint(services) {
           for (const id of ids) {
             const found = byId.get(id);
             if (!found) return false;
-            if (!insideSelected(found)) officeShape(context, found).delete();
+            if (!insideSelected(found)) targetShape(found).delete();
           }
         } else if (command.op === 'select') {
           const ids = (command.ids || (command.id !== undefined ? [command.id] : [])).map(String);
@@ -356,8 +442,11 @@ export async function connectPowerPoint(services) {
       await context.sync();
       if (!slides.items.length) throw new Error('请先在当前演示文稿中添加幻灯片。');
       const indices = selectedSlides.items.map(slide => slides.items.findIndex(item => item.id === slide.id));
-      if (indices.length > 1) return false;
-      const slideIndex = indices[0] ?? 0;
+      let slideIndex = indices[0] ?? 0;
+      if (indices.length > 1) {
+        slideIndex = await parentSlideIndex(context, slides, selection);
+        if (slideIndex < 0) return false;
+      }
       const targets = new Map(selection.items.map(item => [String(item.id), item]));
       if (!commands.every(command => command.op !== 'update' || targets.has(String(command.id)))) return false;
       let selectedIds;
@@ -665,10 +754,89 @@ export async function connectPowerPoint(services) {
       notifying = false;
       const change = { kind: emittedKind };
       emittedKind = null;
-      for (const callback of listeners) {
+      for (const callback of listeners.keys()) {
         try { callback(change); } catch (error) { services?.reportError?.(error, { operation: 'powerpoint-change' }); }
       }
     });
+  }
+  const isHidden = () => globalThis.document?.visibilityState === 'hidden';
+  function hasContentListener() {
+    for (const entry of listeners.values()) if (entry.mode !== 'selection') return true;
+    return false;
+  }
+  function needsPolling() {
+    return !stopped && listeners.size > 0 && !isHidden() && (hasContentListener() || !selectionEventSupported);
+  }
+  function schedulePoll(delay = 1500) {
+    clearTimeout(timer);
+    timer = undefined;
+    if (needsPolling()) timer = setTimeout(poll, delay);
+  }
+  function reconcileWatch() {
+    if (!needsPolling()) {
+      clearTimeout(timer);
+      timer = undefined;
+      return;
+    }
+    if (!timer) timer = setTimeout(poll, 1500);
+  }
+  function onSelectionEvent() {
+    if (stopped || !listeners.size || isHidden()) return;
+    emit('selection');
+    if (hasContentListener() && !pending) schedulePoll(50);
+  }
+  function removeSelectionEvent(force = false) {
+    if (!force && !selectionSubscribed) return;
+    selectionSubscribed = false;
+    selectionEventSupported = false;
+    const documentApi = Office?.context?.document;
+    const eventType = Office?.EventType?.DocumentSelectionChanged;
+    if (typeof documentApi?.removeHandlerAsync === 'function' && eventType) {
+      try { documentApi.removeHandlerAsync(eventType, { handler: onSelectionEvent }, () => {}); } catch {}
+    }
+  }
+  function ensureSelectionEvent() {
+    if (selectionSubscribed) return;
+    const documentApi = Office?.context?.document;
+    const eventType = Office?.EventType?.DocumentSelectionChanged;
+    if (typeof documentApi?.addHandlerAsync !== 'function' || !eventType) return;
+    selectionSubscribed = true;
+    try {
+      documentApi.addHandlerAsync(eventType, onSelectionEvent, result => {
+        const failedStatus = Office?.AsyncResultStatus?.Failed;
+        const failed = Boolean(result && (result.status === 'failed' || (failedStatus !== undefined && result.status === failedStatus)));
+        if (failed || stopped || !listeners.size) {
+          selectionEventSupported = false;
+          if ((stopped || !listeners.size) && !failed) removeSelectionEvent(true);
+          else selectionSubscribed = false;
+          reconcileWatch();
+          return;
+        }
+        selectionEventSupported = true;
+        reconcileWatch();
+      });
+    } catch {
+      selectionSubscribed = false;
+      selectionEventSupported = false;
+    }
+  }
+  function onVisibilityChange() {
+    if (isHidden()) {
+      clearTimeout(timer);
+      timer = undefined;
+      return;
+    }
+    reconcileWatch();
+    if (!stopped && listeners.size) emit('selection');
+  }
+  function detachDocumentWatchers() {
+    clearTimeout(timer);
+    timer = undefined;
+    removeSelectionEvent();
+    if (visibilitySubscribed) {
+      visibilitySubscribed = false;
+      globalThis.document?.removeEventListener?.('visibilitychange', onVisibilityChange);
+    }
   }
   // Cheap watch fingerprint: live IDs, geometry, type, name, z-order and text only.
   async function surfaceFingerprint() {
@@ -711,15 +879,17 @@ export async function connectPowerPoint(services) {
   }
   // Lightweight Office.js watch only: never export full PPTX packages on a background timer.
   async function poll() {
-    if (stopped || !listeners.size) return;
-    if (pending) { timer = setTimeout(poll, 1500); return; }
+    timer = undefined;
+    if (!needsPolling()) return;
+    if (pending) { schedulePoll(1500); return; }
     try {
       const cheap = await serial(surfaceFingerprint);
-      if (surface === undefined) surface = cheap;
-      else if (cheap.content !== surface.content) { surface = cheap; emit('content'); }
-      else if (cheap.selection !== surface.selection) { surface = cheap; emit('selection'); }
+      const previous = surface;
+      surface = cheap;
+      if (previous && cheap.content !== previous.content) emit('content');
+      else if (previous && !selectionEventSupported && cheap.selection !== previous.selection) emit('selection');
     } catch (error) { await services?.reportError?.(error, { operation: 'powerpoint-watch' }); }
-    if (!stopped && listeners.size) timer = setTimeout(poll, 1500);
+    schedulePoll(1500);
   }
   const host = {
     name: 'Microsoft PowerPoint', kind: 'powerpoint',
@@ -743,6 +913,30 @@ export async function connectPowerPoint(services) {
         if (geometryUpdate(command)) { moved = true; movedIds.add(String(command.id)); }
         else if (command.op !== 'select') rich = true;
         if (command.slideIndex !== undefined) rich = true;
+      }
+      // Roll back newly created top-level groups without exporting the slide or using AppleScript.
+      if (options.readback === false && commands.every(command => command.op === 'ungroup' && command.slideIndex === undefined)) {
+        await PowerPoint.run(async context => {
+          const presentation = context.presentation;
+          const slides = options.target ? presentation.slides : presentation.getSelectedSlides();
+          slides.load('items/id');
+          if (options.target) presentation.load('id');
+          await context.sync();
+          if (!options.target && slides.items.length !== 1) throw new Error('请先选中要取消编组的幻灯片。');
+          if (options.target) targetSlideIndex(presentation, slides, options.target);
+          const slide = options.target ? slides.getItem(String(options.target.slideId)) : slides.items[0];
+          const shapes = slide.shapes;
+          for (const { id } of commands) shapes.getItem(String(id)).group.ungroup();
+          await context.sync();
+        });
+        emit();
+        return { applied: commands.length };
+      }
+      if (options.target) {
+        if (!isSimpleOfficeBatch(commands)) throw new Error('该命令不能绑定到指定幻灯片。');
+        const model = await applySimpleOffice(commands, options.readback !== false, options.target);
+        if (!model) throw new Error('原幻灯片上的对象已经变化，请重新选择后重试。');
+        return model;
       }
       if (options.readback === false && commands.every(command => command.op === 'update'
         && command.slideIndex === undefined && Object.keys(command.properties || {}).every(key => directProperties.has(key)))) {
@@ -796,9 +990,10 @@ export async function connectPowerPoint(services) {
       return fragment;
     }),
     insertFragment: (fragment, options = {}) => serial(async () => {
-      const source = await snapshot();
-      await native('insertFragment', { fragment, options, context: source.context });
-      const result = (await snapshot()).context;
+      const source = options.target ? { context: await geometryContext({ target: options.target }) } : await snapshot();
+      await native('insertFragment', { fragment, options, context: source.context,
+        ...(options.target ? { slideId: source.context.slideId, documentUrl: Office.context.document.url } : {}) });
+      const result = options.readback === false ? undefined : (await snapshot()).context;
       emit(); return result;
     }),
     rasterizeImage: (id, options = {}) => serial(async () => {
@@ -815,12 +1010,25 @@ export async function connectPowerPoint(services) {
         ids: (options.ids || source.context.selectionIds).map(id => { const shape = find(source.context, id); return shape.packageId || shape.id; }) });
       return native('export', { ...options, pptx: source.pptx, slideIndex: source.packageSlideIndex, context: source.context, fragment });
     }),
-    onChanged(callback) {
-      listeners.add(callback);
-      if (listeners.size === 1 && !stopped) timer = setTimeout(poll, 1500);
-      return () => { listeners.delete(callback); if (!listeners.size) clearTimeout(timer); };
+    onChanged(callback, options = {}) {
+      const mode = options?.mode === 'selection' ? 'selection' : 'all';
+      const first = listeners.size === 0;
+      listeners.set(callback, { mode });
+      if (first && !stopped) {
+        ensureSelectionEvent();
+        if (!visibilitySubscribed && typeof globalThis.document?.addEventListener === 'function') {
+          visibilitySubscribed = true;
+          globalThis.document.addEventListener('visibilitychange', onVisibilityChange);
+        }
+      }
+      reconcileWatch();
+      return () => {
+        listeners.delete(callback);
+        if (!listeners.size) detachDocumentWatchers();
+        else reconcileWatch();
+      };
     },
-    dispose() { stopped = true; clearTimeout(timer); listeners.clear(); }
+    dispose() { stopped = true; detachDocumentWatchers(); listeners.clear(); }
   };
   return host;
 }

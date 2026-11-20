@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, utimes, access, chmod } from 'node:fs/promises';
+import { closeSync, openSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
@@ -111,6 +112,49 @@ test('service lifecycle: loopback listeners, hello, removed grant route, cache s
     }
   } finally {
     await chmod(path.join(home, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/tmp/SlideSCI-Mac'), 0o700).catch(() => {});
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('under launchd a taken port exits cleanly, and the service rotates its own log', { timeout: 60000 }, async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'slidesci-supervisor-'));
+  const blocker = net.createServer();
+  try {
+    await new Promise(resolve => blocker.listen(0, '127.0.0.1', resolve));
+    const taken = blocker.address().port;
+    const exitCode = env => new Promise(resolve => {
+      const child = spawn(process.execPath, [server], { env: { ...process.env, HOME: home, SLIDESCI_HTTP_PORT: String(taken), SLIDESCI_ACCEPTANCE: '', ...env }, stdio: 'ignore' });
+      child.on('exit', code => resolve(code));
+    });
+    // launchd restarts a non-zero exit every 10 s, which never frees a port held by another program.
+    assert.equal(await exitCode({ SLIDESCI_SUPERVISOR: 'launchd' }), 0);
+    assert.equal(await exitCode({ SLIDESCI_SUPERVISOR: '' }), 1, 'a manual start still reports the failure');
+
+    const log = path.join(home, 'service.log');
+    await writeFile(log, 'x'.repeat(5 * 1024 * 1024 + 16));
+    const fd = openSync(log, 'a');
+    const httpPort = await freePort();
+    const child = spawn(process.execPath, [server], {
+      env: { ...process.env, HOME: home, SLIDESCI_HTTP_PORT: String(httpPort), SLIDESCI_ACCEPTANCE: '', SLIDESCI_LOG_FILE: log },
+      stdio: ['ignore', fd, fd]
+    });
+    closeSync(fd);
+    const exited = new Promise(resolve => child.on('exit', code => resolve(code)));
+    try {
+      const deadline = Date.now() + 15000;
+      while (!(await readFile(log, 'utf8')).includes(`127.0.0.1:${httpPort}`)) {
+        if (Date.now() > deadline || child.exitCode !== null) throw new Error('service did not start');
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      const current = await readFile(log, 'utf8');
+      assert.ok(current.length < 4096 && !current.includes('xxxx'), 'the oversized log is truncated before startup lines are written');
+      assert.equal((await readFile(log + '.1', 'utf8')).length, 5 * 1024 * 1024 + 16, 'the previous log is kept once');
+    } finally {
+      child.kill('SIGTERM');
+      await exited;
+    }
+  } finally {
+    await new Promise(resolve => blocker.close(resolve));
     await rm(home, { recursive: true, force: true });
   }
 });

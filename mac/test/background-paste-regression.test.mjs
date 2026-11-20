@@ -189,6 +189,29 @@ test('switching to the next slide never treats pre-existing selected pictures as
   }
 });
 
+test('a TIFF drop observed after landing cannot replace an older picture missing from the cached baseline', async () => {
+  const services = fakeServices();
+  const slide = { presentationId: 'deck', slideId: 'page', selectionIds: [], shapes: [] };
+  const commands = [];
+  const adapter = {
+    kind: 'powerpoint',
+    async context() { return structuredClone(slide); },
+    async summary() { return structuredClone(slide); },
+    async apply(batch) { commands.push(...batch); return structuredClone(slide); },
+    onChanged() { return () => {}; }
+  };
+  const runtime = await startBackgroundTracking({ host: 'powerpoint', services, hostAdapter: adapter });
+  try {
+    await runtime.refreshKnown();
+    slide.shapes.push(...['old', 'dropped'].map(id => ({ id, type: 'picture', tags: {}, alternativeText: '' })));
+    slide.selectionIds = ['dropped'];
+    services.emit('mediaSource', { host: 'com.microsoft.Powerpoint', reason: 'drop', files: [{ path: '/tmp/source.tif', name: 'source.tif' }] });
+    await runtime.checkPending();
+    await runtime.queue;
+    assert.deepEqual(commands, []);
+  } finally { await stopBackgroundTracking('powerpoint'); }
+});
+
 test('insertSourceFiles in update mode skips missing shapeIds instead of inserting duplicate copies', async () => {
   const services = fakeServices();
   const applied = [];

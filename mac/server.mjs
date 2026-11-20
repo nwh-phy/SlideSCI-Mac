@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { lookup } from 'node:dns/promises';
 import { lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFileSync, fstatSync, ftruncateSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -42,6 +43,21 @@ function diagnose(message) {
 }
 // A long-lived local service must log, not exit, when one request leaves a promise unhandled.
 process.on('unhandledRejection', error => { console.error('SlideSCI 未处理的异步错误：' + (error?.stack || error)); diagnose(error?.message || error); });
+// launchd opens the log once at login in append mode and the service may run for weeks, so the
+// service rotates its own log: copy it aside, then truncate in place (appends continue at the end).
+const LOG_LIMIT = 5 * 1024 * 1024;
+function rotateLog(file = process.env.SLIDESCI_LOG_FILE, fd = 1, limit = LOG_LIMIT) {
+  if (!file) return false;
+  try {
+    const output = fstatSync(fd), current = statSync(file);
+    if (!output.isFile() || output.ino !== current.ino || output.dev !== current.dev || output.size <= limit) return false;
+    copyFileSync(file, file + '.1');
+    ftruncateSync(fd, 0);
+    return true;
+  } catch { return false; }
+}
+rotateLog();
+setInterval(rotateLog, 3600 * 1000).unref();
 const clients = new Set();
 const watchLeases = new Map();
 const LEASE_GRACE = 60000;
@@ -273,8 +289,11 @@ try {
 } catch (error) {
   console.error(error.code === 'EADDRINUSE' ? `SlideSCI 无法启动：端口 ${error.port} 已被其他程序占用（可能是另一个 SlideSCI 服务）。` : `SlideSCI 无法启动：${error.message}`);
   await rm(env.workDir, { recursive: true, force: true }).catch(() => {});
-  process.exit(1);
+  // Under the login LaunchAgent a non-zero exit is restarted every 10 s; a taken port or a bad
+  // certificate does not heal by retrying, so exit cleanly and let Start.command report it.
+  process.exit(process.env.SLIDESCI_SUPERVISOR === 'launchd' ? 0 : 1);
 }
+
 
 // Only sweep this process's own tmpdir workspace at startup; host container caches are never
 // touched until an advanced native action actually writes to that host container.

@@ -31,10 +31,16 @@ export function readRecord(shape, prefix) {
 }
 export function writeRecord(text, prefix, value) { const lines = (text || '').split(/\r\n|[\r\n]/).filter(x => !x.startsWith(prefix)); while (lines.at(-1) === '') lines.pop(); if (value) lines.push(prefix + JSON.stringify(value)); return lines.join('\n'); }
 export function fovOf(shape) { return readRecord(shape, FOV_PREFIX); }
+// Windows native intersections store an already-visible FOV and a source calibration stamp.
+// Mac derived rasters store full-raster FOV, including older Mac pictures with only FOV_VISIBLE.
 export function visibleFov(shape, fov = fovOf(shape)) {
   if (!fov || !units[fov.unit]) return null;
-  const crop = content(shape)?.crop || {}, visible = tag(content(shape), 'SLIDESCI_FOV_VISIBLE') === '1';
-  return { width: +fov.width * units[fov.unit] * (visible ? 1 : 1 - (crop.left || 0) - (crop.right || 0)), height: +fov.height * units[fov.unit] * (visible ? 1 : 1 - (crop.top || 0) - (crop.bottom || 0)) };
+  const image = content(shape);
+  if (tag(image, 'SLIDESCI_FOV_VISIBLE') === '1' && tag(image, 'SLIDESCI_FOV_SOURCE')) {
+    return { width: +fov.width * units[fov.unit], height: +fov.height * units[fov.unit] };
+  }
+  const crop = image?.crop || {};
+  return { width: +fov.width * units[fov.unit] * (1 - (crop.left || 0) - (crop.right || 0)), height: +fov.height * units[fov.unit] * (1 - (crop.top || 0) - (crop.bottom || 0)) };
 }
 export function validFov(fov) { if (!fov || !units[fov.unit] || ![+fov.width, +fov.height].every(x => Number.isFinite(x) && x >= 0) || !(+fov.width > 0 || +fov.height > 0)) throw new Error('请填写至少一个大于 0 的 FOV 尺寸，并选择物理长度单位。'); return fov; }
 export const defaultScale = { vertical: false, widthMicrometers: 50, heightMicrometers: 50, lengthUnit: 'μm', thicknessPoints: 3, showText: true, barColor: '#ffffff', fontColor: '#ffffff', fontSize: 14, fontName: 'Arial', bold: true, corner: 'BottomRight', groupWithImage: true };
@@ -55,10 +61,22 @@ export function textSize(text, font) {
   const m = ctx.measureText(text);
   return { width: (m.width + 2) * 72 / 96, height: Math.max(font.size * 1.18, ((m.actualBoundingBoxAscent || 0) + (m.actualBoundingBoxDescent || 0)) * 72 / 96) };
 }
+// Six significant digits keep small physical lengths (4 nm, 10 nm) from collapsing to zero while
+// trimming binary floating-point noise such as 0.30000000000000004.
+export function formatAmount(value) {
+  const amount = +value;
+  if (!Number.isFinite(amount)) return '';
+  if (amount === 0) return '0';
+  const magnitude = Math.floor(Math.log10(Math.abs(amount)));
+  const decimals = Math.min(20, Math.max(0, 5 - magnitude));
+  const fixed = amount.toFixed(decimals);
+  const trimmed = fixed.includes('.') ? fixed.replace(/0+$/, '').replace(/\.$/, '') : fixed;
+  return +trimmed === 0 ? (+amount.toPrecision(6)).toString() : trimmed;
+}
 export function scaleLayout(image, fov, settings, measured) {
   const s = { ...defaultScale, ...settings }, amount = +(s.vertical ? s.heightMicrometers : s.widthMicrometers);
   if (![+s.widthMicrometers, +s.heightMicrometers].every(x => Number.isFinite(x) && x >= 0) || !positive(s.thicknessPoints) || !positive(s.fontSize) || +s.fontSize > 400 || !units[s.lengthUnit] || !['TopLeft', 'BottomLeft', 'TopRight', 'BottomRight'].includes(s.corner)) throw new Error('比例尺参数无效。');
-  const label = `${+(amount / units[s.lengthUnit]).toFixed(2)}${s.lengthUnit}`;
+  const label = `${formatAmount(amount / units[s.lengthUnit])}${s.lengthUnit}`;
   if (!amount) return { label, bar: null, text: null };
   const field = s.vertical ? fov?.height : fov?.width;
   if (!positive(field)) throw new Error(s.vertical ? '纵向比例尺需要填写 FOV 高度。' : '横向比例尺需要填写 FOV 宽度。');
