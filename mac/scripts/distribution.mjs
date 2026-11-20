@@ -52,6 +52,8 @@ function launchAgentPlist() {
     '  <key>EnvironmentVariables</key>',
     '  <dict>',
     '    <key>NODE_ENV</key><string>production</string>',
+    '    <key>SLIDESCI_SUPERVISOR</key><string>launchd</string>',
+    `    <key>SLIDESCI_LOG_FILE</key><string>${xmlEscape(logFile)}</string>`,
     '  </dict>',
     '</dict>',
     '</plist>',
@@ -61,11 +63,16 @@ function launchAgentPlist() {
 async function writeLaunchAgent() {
   await atomic(launchAgentFile, launchAgentPlist(), 0o644);
 }
-function launchAgentLoaded() {
-  if (!launchctlAvailable()) return false;
-  try { execFileSync(launchctlTool, ['print', `${launchDomain()}/${launchAgentLabel}`], { stdio: 'ignore' }); return true; }
-  catch { return false; }
+// A loaded job is not necessarily a running one: after a clean exit (a taken port at login, or the
+// process ended in Activity Monitor) launchd keeps the job loaded without restarting it.
+function launchAgentState() {
+  if (!launchctlAvailable()) return { loaded: false, running: false };
+  try {
+    const output = execFileSync(launchctlTool, ['print', `${launchDomain()}/${launchAgentLabel}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return { loaded: true, running: /^\s*state = running\s*$/m.test(output) || /^\s*pid = \d+\s*$/m.test(output) };
+  } catch { return { loaded: false, running: false }; }
 }
+const launchAgentLoaded = () => launchAgentState().loaded;
 async function waitForListening(certificate) {
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
@@ -137,14 +144,19 @@ async function serviceRecord() {
   console.log('已清除过期的服务记录（电脑重启、服务退出或进程号已被其他程序使用）；未结束任何进程。');
   return null;
 }
-async function stop() {
+// Stop.command also removes the login item, or launchd would start the service again at the next
+// login; Start.command writes it back. Upgrades and certificate renewal keep it (keepAutostart).
+async function stop({ keepAutostart = false } = {}) {
   const hadAgent = launchAgentLoaded();
   if (hadAgent && !bootoutLaunchAgent()) {
     throw new Error('无法停止 SlideSCI 后台自启服务；未修改安装目录或加载项注册，升级与卸载已中止。请稍后重试或重启电脑。');
   }
+  const hadAutostart = !keepAutostart && await exists(launchAgentFile);
+  if (hadAutostart) await fs.rm(launchAgentFile, { force: true });
   const record = await serviceRecord();
   if (!record) {
-    console.log(hadAgent ? '已停止 SlideSCI 后台自启服务。' : 'SlideSCI 本机服务未在运行。');
+    if (hadAgent) console.log(hadAutostart ? '已停止 SlideSCI 后台自启服务，并取消登录自动运行；需要时运行 Start.command。' : '已停止 SlideSCI 后台自启服务。');
+    else console.log(hadAutostart ? 'SlideSCI 本机服务未在运行；已取消登录自动运行。' : 'SlideSCI 本机服务未在运行。');
     return;
   }
   process.kill(-record.pid, 'SIGTERM');
@@ -199,7 +211,13 @@ function httpsSession(certificate) {
 }
 async function start({ launchAgent = launchctlAvailable(), trust = true } = {}) {
   if (!await exists(recordFile) || !await exists(path.join(application, 'BUILD-INFO.json'))) throw new Error('请先运行 Install.command。');
-  let running = Boolean(await serviceRecord() || launchAgentLoaded());
+  const agent = launchAgentState();
+  if (agent.loaded && !agent.running) {
+    // Unload the exited job so it can be bootstrapped again below, after the port check.
+    if (!bootoutLaunchAgent()) throw new Error('无法重置已退出的 SlideSCI 后台自启服务，请稍后重试或重启电脑。');
+    console.log('SlideSCI 后台自启服务已退出，正在重新启动。');
+  }
+  let running = Boolean(await serviceRecord()) || agent.running;
   const { days } = await certificateStatus();
   if (days <= 0) {
     console.log('PowerPoint 使用的本机证书已过期，正在生成新证书。');
@@ -239,7 +257,7 @@ async function start({ launchAgent = launchctlAvailable(), trust = true } = {}) 
   const log = await fs.open(logFile, 'a', 0o600);
   const child = spawn(path.join(application, 'runtime/bin/node'), [path.join(application, 'mac/server.mjs'), '--cert', path.join(state, 'tls/localhost.crt'), '--key', path.join(state, 'tls/localhost.key')], {
     cwd: application, detached: true, stdio: ['ignore', log.fd, log.fd],
-    env: { ...process.env, NODE_OPTIONS: '', NODE_ENV: 'production', SLIDESCI_ACCEPTANCE: '', SLIDESCI_NATIVE_DEBUG: '', SLIDESCI_HTTP_PORT: '', SLIDESCI_HTTPS_PORT: '' }
+    env: { ...process.env, NODE_OPTIONS: '', NODE_ENV: 'production', SLIDESCI_ACCEPTANCE: '', SLIDESCI_NATIVE_DEBUG: '', SLIDESCI_HTTP_PORT: '', SLIDESCI_HTTPS_PORT: '', SLIDESCI_SUPERVISOR: '', SLIDESCI_LOG_FILE: logFile }
   });
   let spawnError;
   child.on('error', error => { spawnError = error; });
@@ -311,7 +329,7 @@ async function replaceCertificate(running) {
       promoted.push(name);
     }
     // The running server keeps its old TLS context until the replacement pair is ready.
-    if (running) await stop();
+    if (running) await stop({ keepAutostart: true });
   } catch (error) {
     const recovery = [];
     for (const name of promoted.reverse()) {
@@ -452,9 +470,15 @@ async function restoreRegistration(item, checkOnly = false) {
 }
 async function clearWefCache(activeHosts) {
   const wefCache = path.join(profile, 'Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef');
-  if (option('--clear-wef-cache', 'yes') === 'no' || !await exists(wefCache)) return;
+  if (option('--clear-wef-cache', null) === 'no' || !await exists(wefCache)) return;
   if (activeHosts.includes('PowerPoint')) {
     console.log('PowerPoint 正在运行，未自动清理 Wef 加载项缓存。若重开 PowerPoint 后在“开发人员加载项”中看不到新版 SlideSCI Mac，请先 Cmd+Q 完全退出 PowerPoint 并执行：');
+    console.log('rm -rf ~/Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef');
+    return;
+  }
+  // The folder also caches other add-ins (they are fetched again), so it is cleared only on consent.
+  if (!await consent('PowerPoint 可能仍缓存旧版 SlideSCI 功能区。是否清理 PowerPoint 加载项缓存（Wef 文件夹，其他加载项的缓存会在下次打开时重新下载）？', '--clear-wef-cache')) {
+    console.log('未清理 Wef 加载项缓存。若重开 PowerPoint 后仍显示旧版或找不到插件，请完全退出 PowerPoint 后执行：');
     console.log('rm -rf ~/Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef');
     return;
   }
@@ -465,6 +489,18 @@ async function clearWefCache(activeHosts) {
     console.log(`未能自动清理 PowerPoint 加载项缓存（${lastLine(error)}）。若重开后仍显示旧版或找不到插件，请完全退出 PowerPoint 后执行：`);
     console.log('rm -rf ~/Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef');
   }
+}
+// Each upgrade keeps exactly one previous program folder for rollback; older ones are removed.
+async function prunePreviousVersions(keep) {
+  const directory = path.dirname(application), prefix = `${path.basename(application)}.previous-`;
+  const removed = [];
+  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+    const file = path.join(directory, entry.name);
+    if (!entry.isDirectory() || !entry.name.startsWith(prefix) || file === keep) continue;
+    try { await fs.rm(file, { recursive: true, force: true }); removed.push(entry.name); }
+    catch (error) { console.log(`未能删除更早的旧版本备份 ${file}：${lastLine(error)}`); }
+  }
+  if (removed.length) console.log(`已删除更早的旧版本备份：${removed.join('、')}`);
 }
 async function install() {
   if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('此安装包仅适用于 Apple Silicon Mac。Intel Mac 请使用源码开发流程；尚未实机验证。');
@@ -513,7 +549,7 @@ async function install() {
   try {
     if (existingRecord) {
       const running = await serviceRecord() ? 'detached' : launchAgentLoaded() ? 'launchAgent' : null;
-      if (running) { await stop(); previousService = running; }
+      if (running) { await stop({ keepAutostart: true }); previousService = running; }
     }
     await fs.cp(root, stage, { recursive: true, errorOnExist: true, force: false });
     await certificate();
@@ -545,7 +581,7 @@ async function install() {
       } catch (error) {
         if (previousService) {
           if (launchAgentLoaded()) {
-            try { await stop(); }
+            try { await stop({ keepAutostart: true }); }
             catch (stopError) {
               preserveActiveInstall = true;
               throw new Error(`${lastLine(error)}；新版服务未能停止，已保留当前安装：${lastLine(stopError)}`, { cause: error });
@@ -559,6 +595,7 @@ async function install() {
       console.log('已生成登录自启配置（隔离测试目录未向系统 launchd 注册）。');
     }
     if (powerPointManifestChanged) await clearWefCache(activeHosts);
+    if (previousApp) await prunePreviousVersions(previousApp);
     console.log((existingRecord ? `SlideSCI 已升级到 ${incomingVersion}。注册宿主：` : 'SlideSCI 已安装。注册宿主：') + installed.map(item => item.host).join('、'));
     if (previousApp) console.log(`旧版本程序已备份至：${previousApp}`);
     if (installed.some(item => item.host === 'powerpoint')) {
@@ -585,6 +622,12 @@ async function install() {
     if (previousRecordBackup && await exists(previousRecordBackup)) {
       try { await atomic(recordFile, await fs.readFile(previousRecordBackup, 'utf8')); }
       catch (rollbackError) { rollbackErrors.push(`恢复安装记录：${lastLine(rollbackError)}`); }
+    }
+    if (wroteLaunchAgent && !existingRecord) {
+      // A failed fresh install must not leave a login item pointing at the removed program.
+      if (launchAgentLoaded() && !bootoutLaunchAgent()) rollbackErrors.push('停止新装的登录自启服务失败');
+      try { await fs.rm(launchAgentFile, { force: true }); }
+      catch (rollbackError) { rollbackErrors.push(`删除登录自启配置：${lastLine(rollbackError)}`); }
     }
     if (wroteLaunchAgent && existingRecord) {
       try {

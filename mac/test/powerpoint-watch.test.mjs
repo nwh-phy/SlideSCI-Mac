@@ -467,3 +467,48 @@ test('scaleTogether and live controls avoid PPTX export for pure pictures and ke
   assert.equal(shapes[2].width, 200);
   assert.equal(shapes[2].height, 80);
 });
+
+test('multi-slide selection resolves the edited slide without AppleScript, and labels drawn as shapes are updated', async t => {
+  const originals = { Office: globalThis.Office, PowerPoint: globalThis.PowerPoint };
+  t.after(() => { for (const [name, value] of Object.entries(originals)) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; } });
+  const { actions } = await import('../src/features/editing.js');
+  let slides;
+  const makeShape = ({ id, name, type, left, top, text = '' }) => {
+    const textRange = loadable({ text, font: { name: 'Arial', size: 12, bold: false }, paragraphFormat: { horizontalAlignment: 'Left' } });
+    const textFrame = loadable({ textRange, wordWrap: false, autoSizeSetting: 'AutoSizeNone', hasText: Boolean(text) });
+    return loadable({ id, name, type, left, top, width: 30, height: 20, rotation: 0, zOrderPosition: 1, textFrame, tags: shapeTags(),
+      getParentSlideOrNullObject: () => slides.items[1] });
+  };
+  const first = [makeShape({ id: 'other', name: 'Other', type: 'TextBox', left: 0, top: 0, text: 'keep' })];
+  const second = [
+    makeShape({ id: 'rect-b', name: 'Label B', type: 'GeometricShape', left: 200, top: 10, text: 'b' }),
+    makeShape({ id: 'rect-a', name: 'Label A', type: 'GeometricShape', left: 10, top: 10, text: 'a' }),
+    makeShape({ id: 'frame', name: 'Frame', type: 'GeometricShape', left: 100, top: 10 })
+  ];
+  slides = collection([
+    loadable({ id: 's1', index: 0, shapes: collection(first) }),
+    loadable({ id: 's2', index: 1, shapes: collection(second) })
+  ]);
+  const selectedIds = ['rect-b', 'rect-a', 'frame'];
+  // Both thumbnails are selected while the shapes being edited sit on the second slide.
+  const presentation = loadable({ id: 'deck', slides, pageSetup: loadable({ slideWidth: 720, slideHeight: 540 }),
+    getSelectedSlides() { return collection(slides.items); },
+    getSelectedShapes() { return collection(selectedIds.map(id => second.find(shape => shape.id === id))); } });
+  globalThis.Office = { HostType: { PowerPoint: 'PowerPoint' }, onReady: async () => ({ host: 'PowerPoint' }),
+    context: { document: { url: '/Users/someone/figures.pptx' }, requirements: { isSetSupported: () => true } } };
+  globalThis.PowerPoint = { run: async operation => operation({ presentation, sync: async () => {} }) };
+  let backendCalls = 0;
+  const services = { async request() { backendCalls++; throw new Error('local service is not running'); }, async reportError() {} };
+  const host = await connectPowerPoint(services);
+  t.after(() => host.dispose());
+  const settingsStore = new Map();
+  const ctx = { host, services, settings: { get: (k, f) => settingsStore.get(k) ?? f, set: (k, v) => settingsStore.set(k, v) } };
+
+  assert.equal((await host.context({ scope: 'selection', geometry: true })).slideId, 's2', 'the slide holding the selected shapes is the target');
+  assert.equal((await host.summary({ slides: false })).slideId, 's2', 'the summary agrees with the geometry context');
+  await actions.find(a => a.id === 'editing.updateLabels').run(ctx, { template: '(a)', startIndex: 1, fontName: 'Helvetica', fontSize: 16, bold: false });
+  assert.deepEqual([second[1], second[0]].map(shape => shape.textFrame.textRange.text), ['(a)', '(b)'], 'rectangles holding text count as labels, ordered by position');
+  assert.equal(second[2].textFrame.textRange.text, '', 'a shape without text is not a label');
+  assert.equal(first[0].textFrame.textRange.text, 'keep', 'the other selected slide is untouched');
+  assert.equal(backendCalls, 0, 'no local service or AppleScript is needed');
+});

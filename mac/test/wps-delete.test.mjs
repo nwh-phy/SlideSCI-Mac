@@ -90,3 +90,25 @@ test('a WPS delete addressed to the original slide ignores the same shape ID on 
   assert.equal(slides[0].Shapes.Count, 0);
   assert.equal(slides[1].Shapes.Count, 1);
 });
+
+// Labels drawn as rectangles are autoshapes (type 1); the geometry context still reports their text.
+test('wps geometry context marks autoshapes that hold text when textMeta is requested', async t => {
+  const original = globalThis.window;
+  t.after(() => { if (original === undefined) delete globalThis.window; else globalThis.window = original; });
+  const shapes = collection([]);
+  const label = shape(31, 1, () => shapes), frame = shape(32, 1, () => shapes), box = shape(33, 17, () => shapes);
+  label.HasTextFrame = -1; label.TextFrame = { TextRange: { Text: '(a)' } };
+  frame.HasTextFrame = -1; frame.TextFrame = { TextRange: { Text: '' } };
+  shapes.items.push(label, frame, box);
+  const slide = { SlideID: 1, SlideIndex: 1, Shapes: shapes };
+  globalThis.window = { Application: {
+    ActivePresentation: { Name: 'labels.pptx', Slides: collection([slide]), PageSetup: { SlideWidth: 720, SlideHeight: 540 } },
+    ActiveWindow: { View: { Slide: slide }, Selection: { Type: 0 } }
+  } };
+  const host = connectWps({ async request(route) { throw new Error(`unexpected ${route}`); }, async reportError() {} });
+  t.after(() => host.dispose());
+  const plain = await host.context({ scope: 'slide', geometry: true });
+  assert.equal(plain.shapes.some(item => 'hasText' in item), false, 'text is only read when requested');
+  const snapshot = await host.context({ scope: 'slide', geometry: true, textMeta: true });
+  assert.deepEqual(snapshot.shapes.map(item => [item.id, item.type, item.hasText]), [['31', 'shape', true], ['32', 'shape', false], ['33', 'text', undefined]]);
+});

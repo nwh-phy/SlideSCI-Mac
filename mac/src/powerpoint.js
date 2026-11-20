@@ -75,13 +75,27 @@ export async function connectPowerPoint(services) {
       else if (value !== undefined && value !== null) shape.tags.add(key, String(value));
     }
   }
-  async function activeSlideIndex(slides, selected) {
+  // Several thumbnails may be selected while the edited shapes sit on one of them. Office.js names
+  // that slide through the selected shapes; AppleScript is only a fallback, and core layout keeps
+  // working on the first selected slide when the local service is unavailable.
+  async function parentSlideIndex(context, slides, selection) {
+    const first = selection?.items?.[0];
+    if (typeof first?.getParentSlideOrNullObject !== 'function') return -1;
+    const parent = first.getParentSlideOrNullObject();
+    parent.load('id');
+    await context.sync();
+    return parent.isNullObject ? -1 : slides.items.findIndex(item => item.id === parent.id);
+  }
+  async function activeSlideIndex(context, slides, selected, selection) {
     const indices = selected.items.map(slide => slides.items.findIndex(item => item.id === slide.id));
     let slideIndex = indices[0] ?? 0;
-    if (indices.length > 1) {
+    if (indices.length <= 1) return { indices, slideIndex };
+    const index = await parentSlideIndex(context, slides, selection);
+    if (index >= 0) return { indices, slideIndex: index };
+    try {
       const active = await native('documentInfo');
       if (indices.includes(active.slideIndex)) slideIndex = active.slideIndex;
-    }
+    } catch { /* The first selected slide stays the target. */ }
     return { indices, slideIndex };
   }
   function targetSlideIndex(presentation, slides, target) {
@@ -117,8 +131,16 @@ export async function connectPowerPoint(services) {
         indices = selected.items.map(slide => slide.index);
         slideIndex = indices[0] ?? 0;
         slideId = selected.items[0]?.id ?? firstSlide.id;
+        // Agree with the geometry context, or the live panel would see a slide change on every event.
+        const first = selection.items[0];
+        if (indices.length > 1 && typeof first?.getParentSlideOrNullObject === 'function') {
+          const parent = first.getParentSlideOrNullObject();
+          parent.load('id,index');
+          await context.sync();
+          if (!parent.isNullObject) { slideIndex = parent.index; slideId = parent.id; }
+        }
       } else {
-        ({ indices, slideIndex } = await activeSlideIndex(slides, selected));
+        ({ indices, slideIndex } = await activeSlideIndex(context, slides, selected, selection));
         slideId = slides.items[slideIndex].id;
       }
       return { presentationId: presentation.id, title: title(), slideIndex, slideId,
@@ -191,7 +213,10 @@ export async function connectPowerPoint(services) {
       presentation.pageSetup.load('slideWidth,slideHeight');
       await context.sync();
       if (!slides.items.length) throw new Error('请先在当前演示文稿中添加幻灯片。');
-      const active = await activeSlideIndex(slides, selectedSlides);
+      // A target names its slide, so the active slide is only looked up when none is given.
+      const active = options.target
+        ? { indices: selectedSlides.items.map(slide => slides.items.findIndex(item => item.id === slide.id)) }
+        : await activeSlideIndex(context, slides, selectedSlides, selection);
       const { indices } = active;
       const slideIndex = options.target ? targetSlideIndex(presentation, slides, options.target) : active.slideIndex;
       const selectionIds = selection.items.map(shape => String(shape.id));
@@ -202,16 +227,30 @@ export async function connectPowerPoint(services) {
         const tree = await readSlideTree(context, slideIndex, geometryShapeLoad, false, options.tags === true, slide);
         shapes = options.scope === 'slide' ? tree : selectSubtrees(tree, wanted);
       }
+      // Text boxes are typed 'text'; placeholders and autoshapes report whether they hold text, so
+      // labels drawn as rectangles or placeholders still count without a full PPTX export.
       if (options.textMeta) {
-        const placeholders = flatten(shapes).filter(shape => shape.nativeType === 'Placeholder');
-        for (const shape of placeholders) {
-          try {
-            const frame = officeShape(context, shape).textFrame;
-            frame.load('hasText');
-            await context.sync();
+        const candidates = flatten(shapes).filter(shape => textTypes.has(shape.nativeType) && shape.nativeType !== 'TextBox');
+        const mark = (shape, frame) => {
+          if (shape.nativeType === 'Placeholder') {
             shape.isPlaceholder = true;
             if (frame.hasText !== undefined) shape.hasTextFrame = true;
-          } catch { /* picture/chart/table placeholder has no text frame */ }
+          }
+          shape.hasText = frame.hasText === true;
+        };
+        const read = shape => { const frame = officeShape(context, shape).textFrame; frame.load('hasText'); return frame; };
+        const frames = [];
+        for (const shape of candidates) {
+          try { frames.push([shape, read(shape)]); } catch { /* no text frame */ }
+        }
+        let batched = !frames.length;
+        if (frames.length) {
+          try { await context.sync(); batched = true; } catch { /* a picture/chart/table placeholder has no text frame */ }
+        }
+        if (batched) for (const [shape, frame] of frames) mark(shape, frame);
+        else for (const [shape] of frames) {
+          try { const frame = read(shape); await context.sync(); mark(shape, frame); }
+          catch { /* this shape has no text frame */ }
         }
       }
       return { presentationId: presentation.id, title: title(), slideId: slides.items[slideIndex].id, slideIndex,
@@ -287,14 +326,20 @@ export async function connectPowerPoint(services) {
     const applied = await PowerPoint.run(async context => {
       const slides = context.presentation.slides;
       const selectedSlides = context.presentation.getSelectedSlides();
+      const selection = target ? null : context.presentation.getSelectedShapes();
       slides.load('items/id');
       selectedSlides.load('items/id');
+      selection?.load('items/id');
       if (target) context.presentation.load('id');
       await context.sync();
       if (!slides.items.length) throw new Error('请先在当前演示文稿中添加幻灯片。');
       const indices = selectedSlides.items.map(slide => slides.items.findIndex(item => item.id === slide.id));
-      if (!target && indices.length > 1) return false;
-      const slideIndex = target ? targetSlideIndex(context.presentation, slides, target) : indices[0] ?? 0;
+      let slideIndex = target ? targetSlideIndex(context.presentation, slides, target) : indices[0] ?? 0;
+      if (!target && indices.length > 1) {
+        // Several thumbnails selected: edit the slide holding the selected shapes, or fall back.
+        slideIndex = await parentSlideIndex(context, slides, selection);
+        if (slideIndex < 0) return false;
+      }
       if (target && commands.some(command => ['insertText', 'group', 'select'].includes(command.op))
         && (indices.length !== 1 || indices[0] !== slideIndex)) throw new Error('请返回开始操作时的幻灯片。');
       const slide = target ? slides.getItem(String(target.slideId)) : slides.getItemAt(slideIndex);
@@ -397,8 +442,11 @@ export async function connectPowerPoint(services) {
       await context.sync();
       if (!slides.items.length) throw new Error('请先在当前演示文稿中添加幻灯片。');
       const indices = selectedSlides.items.map(slide => slides.items.findIndex(item => item.id === slide.id));
-      if (indices.length > 1) return false;
-      const slideIndex = indices[0] ?? 0;
+      let slideIndex = indices[0] ?? 0;
+      if (indices.length > 1) {
+        slideIndex = await parentSlideIndex(context, slides, selection);
+        if (slideIndex < 0) return false;
+      }
       const targets = new Map(selection.items.map(item => [String(item.id), item]));
       if (!commands.every(command => command.op !== 'update' || targets.has(String(command.id)))) return false;
       let selectedIds;

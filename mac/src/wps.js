@@ -430,7 +430,7 @@ export function connectWps(services = {}) {
   // flatten/selected/bounds/alignment 现有的数学语义。ids 为空集合时只看选择，
   // 传 null 时返回整页几何。组内子形状返回的是原生坐标（可能位于组坐标系），
   // 只用于结构、选择与基线，不能当页面坐标做数学：选择范围遇到组内选中会回落到富上下文。
-  function geometryShapes(nodes, slideIndex, ids, withTags) {
+  function geometryShapes(nodes, slideIndex, ids, withTags, textMeta = false) {
     const wanted = ids === null ? undefined : new Set((ids || []).map(String));
     if (wanted && !wanted.size) return [];
     const included = new Set();
@@ -451,6 +451,11 @@ export function connectWps(services = {}) {
     const build = parentId => (byParent.get(parentId) || []).map(node => {
       const shape = geometryShape(node, slideIndex);
       if (withTags) shape.tags = readTags(node.native);
+      // 自选图形里的文字（如用矩形做的标签）在几何上下文中也要可识别。
+      if (textMeta && shape.type !== 'text') {
+        shape.hasText = boolean(optional(() => node.native.HasTextFrame))
+          && String(optional(() => node.native.TextFrame.TextRange.Text) || '').length > 0;
+      }
       const children = build(node.id);
       if (children.length) shape.children = children;
       return shape;
@@ -477,7 +482,7 @@ export function connectWps(services = {}) {
     return { presentationId: presentationKey(active.presentation), title: presentationTitle(active.presentation),
       slideId: String(optional(() => active.slide.SlideID) || active.slideIndex + 1), slideIndex: active.slideIndex,
       width, height, selectionIds, geometry: true,
-      shapes: ids === null || ids.length ? geometryShapes(nodes || geometryTree(active.slide), active.slideIndex, ids, options.tags === true) : [],
+      shapes: ids === null || ids.length ? geometryShapes(nodes || geometryTree(active.slide), active.slideIndex, ids, options.tags === true, options.textMeta === true) : [],
       selectedSlideIndices: selection.type === PP_SELECTION_SLIDES ? (selection.slideIndices || []) : [] };
   }
   // 组内选中的对齐沿用原有富坐标路径：以解析子坐标系坐标计算、原生写回，

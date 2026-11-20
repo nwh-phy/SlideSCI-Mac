@@ -90,7 +90,12 @@ const fs = require('node:fs'), path = require('node:path');
 const state = process.env.FAKE_LAUNCHCTL_STATE, args = process.argv.slice(2);
 fs.appendFileSync(path.join(state, 'calls.log'), args.join(' ') + '\\n');
 const loaded = path.join(state, 'loaded');
-if (args[0] === 'print') process.exit(fs.existsSync(loaded) ? 0 : 113);
+if (args[0] === 'print') {
+  if (!fs.existsSync(loaded)) process.exit(113);
+  // A job that exited cleanly stays loaded without a pid.
+  console.log(fs.existsSync(path.join(state, 'exited')) ? '\\tstate = not running' : '\\tstate = running\\n\\tpid = 4242');
+  process.exit(0);
+}
 if (args[0] === 'bootstrap') { fs.writeFileSync(loaded, args.at(-1)); process.exit(0); }
 if (args[0] === 'bootout') { if (!fs.existsSync(loaded)) process.exit(3); fs.rmSync(loaded); process.exit(0); }
 process.exit(2);
@@ -111,6 +116,8 @@ process.exit(2);
     assert.match(plistText, /com\.slidesci\.mac\.service/);
     const stopOut = runInstaller('stop', [], { SLIDESCI_LAUNCHCTL: fakeLaunchctl, FAKE_LAUNCHCTL_STATE: launchState });
     assert.match(stopOut, /已停止 SlideSCI 后台自启服务/);
+    assert.match(stopOut, /取消登录自动运行/);
+    assert.equal(await readFile(plist, 'utf8').then(() => true, () => false), false, 'Stop removes the login item so the service stays stopped after the next login');
     runInstaller('uninstall', [], { SLIDESCI_LAUNCHCTL: fakeLaunchctl, FAKE_LAUNCHCTL_STATE: launchState });
     assert.equal(await readFile(plist, 'utf8').then(() => true, () => false), false, 'uninstall removes LaunchAgent plist');
   } finally { await chmod(cache, 0o700).catch(() => {}); await rm(home, { recursive: true, force: true }); }
@@ -146,7 +153,12 @@ const fs = require('node:fs'), path = require('node:path');
 const state = process.env.FAKE_LAUNCHCTL_STATE, args = process.argv.slice(2);
 fs.appendFileSync(path.join(state, 'calls.log'), args.join(' ') + '\\n');
 const loaded = path.join(state, 'loaded');
-if (args[0] === 'print') process.exit(fs.existsSync(loaded) ? 0 : 113);
+if (args[0] === 'print') {
+  if (!fs.existsSync(loaded)) process.exit(113);
+  // A job that exited cleanly stays loaded without a pid.
+  console.log(fs.existsSync(path.join(state, 'exited')) ? '\\tstate = not running' : '\\tstate = running\\n\\tpid = 4242');
+  process.exit(0);
+}
 if (args[0] === 'bootstrap') {
   if (process.env.FAKE_LAUNCHCTL_FAIL_BOOTSTRAP) { console.error('Bootstrap failed: 5: Input/output error'); process.exit(5); }
   if (process.env.FAKE_LAUNCHCTL_FAIL_VERSION) {
@@ -275,7 +287,7 @@ test('install upgrades in place, stops old service, reuses trusted cert, clears 
     runPkg(v1Pkg, 'install', ['--trust-certificate', 'yes', '--clear-wef-cache', 'no']);
     assert.equal(await readFile(path.join(wefDir, 'SlideSCI-Mac.xml'), 'utf8'), v1Manifest);
 
-    const upgradeOut = runPkg(v2Pkg, 'install', ['--upgrade', 'yes', '--trust-certificate', 'no']);
+    const upgradeOut = runPkg(v2Pkg, 'install', ['--upgrade', 'yes', '--trust-certificate', 'no', '--clear-wef-cache', 'yes']);
     assert.match(upgradeOut, /SlideSCI 已升级到 0\.2\.0/);
     assert.match(upgradeOut, /已清理 PowerPoint 加载项缓存（Wef）/);
     assert.match(upgradeOut, /SlideSCI-Mac\.previous-/);
@@ -494,4 +506,39 @@ test('Start leaves the WPS service running if the replacement TLS pair cannot be
     await chmod(tls, 0o700);
     await rm(fixture.home, { recursive: true, force: true });
   }
+});
+
+test('upgrades keep one previous folder, ask before clearing the Wef cache, and Start relaunches an exited login item', async () => {
+  const fixture = await upgradeEnvironment('slidesci-upgrade-hygiene-');
+  const { home, launchState, v1Pkg, v2Pkg, runPkg, launchCalls } = fixture;
+  const wefCache = path.join(home, 'Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef');
+  const support = path.join(home, 'Library/Application Support');
+  const previous = async () => (await readdir(support)).filter(name => name.startsWith('SlideSCI-Mac.previous-'));
+  try {
+    await mkdir(wefCache, { recursive: true });
+    await writeFile(path.join(wefCache, 'stale-cache.json'), '{}');
+    runPkg(v1Pkg, 'install', ['--trust-certificate', 'no']);
+    // Without an answer (no terminal) the shared Wef cache is kept and the manual command is shown.
+    const first = runPkg(v2Pkg, 'install', ['--upgrade', 'yes', '--trust-certificate', 'no']);
+    assert.match(first, /未清理 Wef 加载项缓存/);
+    assert.equal(await readFile(path.join(wefCache, 'stale-cache.json'), 'utf8'), '{}', 'other add-ins keep their cache without consent');
+    assert.equal((await previous()).length, 1);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const second = runPkg(v2Pkg, 'install', ['--upgrade', 'yes', '--trust-certificate', 'no']);
+    assert.match(second, /已删除更早的旧版本备份/);
+    const kept = await previous();
+    assert.equal(kept.length, 1, 'only the latest previous version is kept');
+    assert.ok(second.includes(path.join(support, kept[0])), 'the kept folder is the one this upgrade backed up');
+
+    // A login item that exited cleanly (for example, its port was taken at login) stays loaded but not running.
+    await writeFile(path.join(launchState, 'exited'), '');
+    const before = (await launchCalls()).filter(line => line.startsWith('boot')).length;
+    const restart = runPkg(v2Pkg, 'start', ['--trust-certificate', 'no']);
+    assert.doesNotMatch(restart, /已经运行/);
+    assert.match(restart, /已退出，正在重新启动/);
+    assert.deepEqual((await launchCalls()).filter(line => line.startsWith('boot')).slice(before).map(line => line.split(' ')[0]), ['bootout', 'bootstrap']);
+    const plist = await readFile(path.join(home, 'Library/LaunchAgents/com.slidesci.mac.service.plist'), 'utf8');
+    assert.match(plist, /<key>SLIDESCI_SUPERVISOR<\/key><string>launchd<\/string>/);
+    assert.match(plist, /<key>SLIDESCI_LOG_FILE<\/key><string>[^<]*service\.log<\/string>/);
+  } finally { await rm(home, { recursive: true, force: true }); }
 });

@@ -458,8 +458,10 @@ definitions.push(
     return { message: `已添加 ${ids.length} 个标签。` };
   }),
   makeAction('updateLabels', '更新图片标签', labelFields, async (ctx, values) => {
-    const { shapes } = await selection(ctx, 1, true);
-    const targets = ordered(shapes.filter(shape => shape.type === 'text'), 'position');
+    // textMeta marks rectangles and placeholders that hold text, so labels drawn as shapes still count.
+    const snapshot = await ctx.host.context({ scope: 'selection', geometry: true, textMeta: true });
+    const shapes = selected(snapshot, 1);
+    const targets = ordered(shapes.filter(shape => shape.type === 'text' || shape.hasText === true), 'position');
     if (!targets.length) throw new Error('请选择要更新标签的文本框。');
     const fontSize = number(values.fontSize, '标签字号', { min: 0.01 });
     const start = number(values.startIndex, '起始编号', { min: 1, max: Number.MAX_SAFE_INTEGER - targets.length, integer: true });
