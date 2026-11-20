@@ -46,7 +46,8 @@ export async function connectPowerPoint(services) {
       ...(presentationName && action !== 'rasterizeImage' ? { presentationName } : {}) });
   };
   let queue = Promise.resolve(), timer, stopped = false, surface, notifying = false, pending = 0;
-  const listeners = new Set();
+  let selectionSubscribed = false, selectionEventSupported = false, visibilitySubscribed = false;
+  const listeners = new Map();
   function serial(operation) {
     pending++;
     const run = async () => { try { return await operation(); } finally { pending--; } };
@@ -665,10 +666,92 @@ export async function connectPowerPoint(services) {
       notifying = false;
       const change = { kind: emittedKind };
       emittedKind = null;
-      for (const callback of listeners) {
+      for (const callback of listeners.keys()) {
         try { callback(change); } catch (error) { services?.reportError?.(error, { operation: 'powerpoint-change' }); }
       }
     });
+  }
+  const isHidden = () => globalThis.document?.visibilityState === 'hidden';
+  function hasContentListener() {
+    for (const entry of listeners.values()) if (entry.mode !== 'selection') return true;
+    return false;
+  }
+  function needsPolling() {
+    return !stopped && listeners.size > 0 && !isHidden() && (hasContentListener() || !selectionEventSupported);
+  }
+  function schedulePoll(delay = 1500) {
+    clearTimeout(timer);
+    timer = undefined;
+    if (needsPolling()) timer = setTimeout(poll, delay);
+  }
+  function reconcileWatch() {
+    if (!needsPolling()) {
+      clearTimeout(timer);
+      timer = undefined;
+      return;
+    }
+    if (!timer) timer = setTimeout(poll, 1500);
+  }
+  function onSelectionEvent() {
+    if (stopped || !listeners.size || isHidden()) return;
+    if (hasContentListener()) {
+      if (!pending) schedulePoll(50);
+      return;
+    }
+    emit('selection');
+  }
+  function removeSelectionEvent(force = false) {
+    if (!force && !selectionSubscribed) return;
+    selectionSubscribed = false;
+    selectionEventSupported = false;
+    const documentApi = Office?.context?.document;
+    const eventType = Office?.EventType?.DocumentSelectionChanged;
+    if (typeof documentApi?.removeHandlerAsync === 'function' && eventType) {
+      try { documentApi.removeHandlerAsync(eventType, { handler: onSelectionEvent }, () => {}); } catch {}
+    }
+  }
+  function ensureSelectionEvent() {
+    if (selectionSubscribed) return;
+    const documentApi = Office?.context?.document;
+    const eventType = Office?.EventType?.DocumentSelectionChanged;
+    if (typeof documentApi?.addHandlerAsync !== 'function' || !eventType) return;
+    selectionSubscribed = true;
+    try {
+      documentApi.addHandlerAsync(eventType, onSelectionEvent, result => {
+        const failedStatus = Office?.AsyncResultStatus?.Failed;
+        const failed = Boolean(result && (result.status === 'failed' || (failedStatus !== undefined && result.status === failedStatus)));
+        if (failed || stopped || !listeners.size) {
+          selectionEventSupported = false;
+          if ((stopped || !listeners.size) && !failed) removeSelectionEvent(true);
+          else selectionSubscribed = false;
+          reconcileWatch();
+          return;
+        }
+        selectionEventSupported = true;
+        reconcileWatch();
+      });
+    } catch {
+      selectionSubscribed = false;
+      selectionEventSupported = false;
+    }
+  }
+  function onVisibilityChange() {
+    if (isHidden()) {
+      clearTimeout(timer);
+      timer = undefined;
+      return;
+    }
+    reconcileWatch();
+    if (!stopped && listeners.size) emit('selection');
+  }
+  function detachDocumentWatchers() {
+    clearTimeout(timer);
+    timer = undefined;
+    removeSelectionEvent();
+    if (visibilitySubscribed) {
+      visibilitySubscribed = false;
+      globalThis.document?.removeEventListener?.('visibilitychange', onVisibilityChange);
+    }
   }
   // Cheap watch fingerprint: live IDs, geometry, type, name, z-order and text only.
   async function surfaceFingerprint() {
@@ -711,15 +794,16 @@ export async function connectPowerPoint(services) {
   }
   // Lightweight Office.js watch only: never export full PPTX packages on a background timer.
   async function poll() {
-    if (stopped || !listeners.size) return;
-    if (pending) { timer = setTimeout(poll, 1500); return; }
+    timer = undefined;
+    if (!needsPolling()) return;
+    if (pending) { schedulePoll(1500); return; }
     try {
       const cheap = await serial(surfaceFingerprint);
       if (surface === undefined) surface = cheap;
       else if (cheap.content !== surface.content) { surface = cheap; emit('content'); }
       else if (cheap.selection !== surface.selection) { surface = cheap; emit('selection'); }
     } catch (error) { await services?.reportError?.(error, { operation: 'powerpoint-watch' }); }
-    if (!stopped && listeners.size) timer = setTimeout(poll, 1500);
+    schedulePoll(1500);
   }
   const host = {
     name: 'Microsoft PowerPoint', kind: 'powerpoint',
@@ -815,12 +899,25 @@ export async function connectPowerPoint(services) {
         ids: (options.ids || source.context.selectionIds).map(id => { const shape = find(source.context, id); return shape.packageId || shape.id; }) });
       return native('export', { ...options, pptx: source.pptx, slideIndex: source.packageSlideIndex, context: source.context, fragment });
     }),
-    onChanged(callback) {
-      listeners.add(callback);
-      if (listeners.size === 1 && !stopped) timer = setTimeout(poll, 1500);
-      return () => { listeners.delete(callback); if (!listeners.size) clearTimeout(timer); };
+    onChanged(callback, options = {}) {
+      const mode = options?.mode === 'selection' ? 'selection' : 'all';
+      const first = listeners.size === 0;
+      listeners.set(callback, { mode });
+      if (first && !stopped) {
+        ensureSelectionEvent();
+        if (!visibilitySubscribed && typeof globalThis.document?.addEventListener === 'function') {
+          visibilitySubscribed = true;
+          globalThis.document.addEventListener('visibilitychange', onVisibilityChange);
+        }
+      }
+      reconcileWatch();
+      return () => {
+        listeners.delete(callback);
+        if (!listeners.size) detachDocumentWatchers();
+        else reconcileWatch();
+      };
     },
-    dispose() { stopped = true; clearTimeout(timer); listeners.clear(); }
+    dispose() { stopped = true; detachDocumentWatchers(); listeners.clear(); }
   };
   return host;
 }

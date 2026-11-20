@@ -4,6 +4,7 @@ import {
 } from './editing-geometry.js';
 
 const geometryKeys = new Set(['left', 'top', 'width', 'height', 'rotation']);
+const needsRichScale = shapes => flatten(shapes).some(shape => !['picture', 'media'].includes(shape.type));
 const section = '排版与编辑';
 const session = new WeakMap();
 const selectField = (name, label, options, value) => ({ name, label, type: 'select', options: options.map(([value, label]) => ({ value, label })), default: value });
@@ -306,6 +307,8 @@ const definitions = [
       { op: 'select', ids: replacement.map(shape => shape.id) }]);
   }, '采用复制组的可编辑结构与格式，按位置把目标文字填入模板；当模板文本框更多时可按行分配。'),
   makeAction('scaleTogether', '图文同比缩放', [numericField('percent', '缩放比例 (%)', 100, 1, 10000)], async (ctx, values) => {
+    const { shapes: lightShapes } = await selection(ctx, 1, true);
+    if (!needsRichScale(lightShapes)) return apply(ctx, scale(lightShapes, values.percent));
     const { shapes } = await selection(ctx);
     return apply(ctx, scale(shapes, values.percent));
   }, '以选择区域左上角为基准，同时缩放对象位置、宽高和各级组内文字字号。'),
@@ -324,29 +327,30 @@ async function addTitles(ctx, values, below) {
   const distance = number(values.distance, '标题距离');
   if (!String(values.fontName).trim()) throw new Error('请输入标题字体名称。');
   const created = [];
-  const resultIds = [];
-  let current = snapshot;
   try {
-    for (const shape of shapes) {
+    const insertCommands = shapes.map(shape => {
       const top = below ? shape.top + shape.height + distance : shape.top - fontSize * 2 - distance;
-      const next = await apply(ctx, [{ op: 'insertText', text: String(values.text), left: shape.left, top, width: shape.width, height: fontSize * 2,
+      return {
+        op: 'insertText', text: String(values.text), left: shape.left, top, width: shape.width, height: fontSize * 2,
         font: { name: values.fontName.trim(), nameFarEast: values.fontName.trim(), size: fontSize },
         paragraphs: [{ runs: [{ text: String(values.text) }], alignment: values.center ? 'center' : 'left' }],
-        textFrame: { wordWrap: true, autoSize: 'shapeToFitText' }, name: `${shape.name} 标题` }]);
-      const inserted = newShapes(current, next);
-      created.push(...inserted.map(item => item.id));
-      if (inserted.length !== 1) throw new Error('标题插入后未找到新增文本框。');
-      current = next;
-      if (values.autoGroup) {
-        const grouped = await apply(ctx, [{ op: 'group', ids: [shape.id, inserted[0].id], name: `${shape.name} 与标题` }]);
-        const old = new Set(current.shapes.map(item => String(item.id)));
-        const group = grouped.shapes.find(item => !old.has(String(item.id)));
-        if (!group) throw new Error('编组后未返回新增组。');
-        resultIds.push(group.id);
-        current = grouped;
-      } else resultIds.push(inserted[0].id);
+        textFrame: { wordWrap: true, autoSize: 'shapeToFitText' }, name: `${shape.name} 标题`
+      };
+    });
+    const next = await apply(ctx, insertCommands);
+    const inserted = newShapes(snapshot, next);
+    created.push(...inserted.map(item => item.id));
+    if (inserted.length !== shapes.length) throw new Error('标题插入后未找到新增文本框。');
+    if (!values.autoGroup) {
+      return apply(ctx, [{ op: 'select', ids: inserted.map(item => item.id) }]);
     }
-    return apply(ctx, [{ op: 'select', ids: resultIds }]);
+    const groupCommands = shapes.map((shape, index) => ({
+      op: 'group', ids: [shape.id, inserted[index].id], name: `${shape.name} 与标题`
+    }));
+    const grouped = await apply(ctx, groupCommands);
+    const groups = newShapes(next, grouped);
+    if (groups.length !== shapes.length) throw new Error('编组后未返回新增组。');
+    return apply(ctx, [{ op: 'select', ids: groups.map(item => item.id) }]);
   } catch (error) {
     // A grouped original must remain intact if a later insertion fails.
     const live = await ctx.host.context({ scope: 'slide', geometry: true });
@@ -429,6 +433,7 @@ export const panels = [{
     let disposed = false;
     let applying = false;
     let liveSnapshot;
+    let liveRich = false;
     let signature = '';
     let activeOperation = Promise.resolve();
     let changePending = false;
@@ -495,6 +500,36 @@ export const panels = [{
     const liveFields = [numericField('scale', '图文比例 (%)', 100, 1, 500, 1),
       numericField('horizontal', '水平间距 (cm)', 0.5, -100, 100, 0.01), numericField('vertical', '垂直间距 (cm)', 0.5, -100, 100, 0.01)];
     live.append(status, reset);
+    function scheduleLive() {
+      if (liveScheduled || disposed) return;
+      liveScheduled = true;
+      activeOperation = activeOperation.then(async () => {
+        applying = true;
+        try {
+          while (!disposed && pendingInputs.size) {
+            const [name, value] = pendingInputs.entries().next().value;
+            pendingInputs.delete(name);
+            if (!liveSnapshot) await capture();
+            if (name === 'scale' && !liveRich && needsRichScale(selected(liveSnapshot, 1))) {
+              const richSnapshot = await ctx.host.context({ scope: 'selection' });
+              if (disposed) return;
+              liveSnapshot = structuredClone(richSnapshot);
+              liveRich = true;
+            }
+            const shapes = selected(liveSnapshot, name === 'scale' ? 1 : 2);
+            const commands = name === 'scale' ? scale(shapes, value) : spacing(shapes, name, value);
+            await apply(ctx, commands);
+            await ctx.settings.set(`editing.live.${name}`, Number(value));
+          }
+          if (!disposed) await ctx.refresh();
+        } catch (error) { pendingInputs.clear(); ctx.notify(error.message, 'error'); }
+        finally {
+          applying = false;
+          liveScheduled = false;
+          if (!disposed && pendingInputs.size) scheduleLive();
+        }
+      });
+    }
     for (const field of liveFields) {
       const control = fieldControl(field, field.default);
       const slider = element('input');
@@ -511,33 +546,17 @@ export const panels = [{
         else slider.value = control.input.value;
         pendingInputs.delete(field.name);
         pendingInputs.set(field.name, control.input.value);
-        if (liveScheduled) return;
-        liveScheduled = true;
-        activeOperation = activeOperation.then(async () => {
-          applying = true;
-          try {
-            while (!disposed && pendingInputs.size) {
-              const [name, value] = pendingInputs.entries().next().value;
-              pendingInputs.delete(name);
-              if (!liveSnapshot) await capture();
-              const shapes = selected(liveSnapshot, name === 'scale' ? 1 : 2);
-              const commands = name === 'scale' ? scale(shapes, value) : spacing(shapes, name, value);
-              await apply(ctx, commands);
-              await ctx.settings.set(`editing.live.${name}`, Number(value));
-            }
-            if (!disposed) await ctx.refresh();
-          } catch (error) { pendingInputs.clear(); ctx.notify(error.message, 'error'); }
-          finally { applying = false; liveScheduled = false; }
-        });
+        scheduleLive();
       };
       control.input.addEventListener('input', () => change(control.input));
       slider.addEventListener('input', () => change(slider));
     }
     container.append(live);
     async function capture() {
-      const snapshot = await ctx.host.context({ scope: 'selection' });
+      const snapshot = await ctx.host.context({ scope: 'selection', geometry: true });
       if (disposed) return;
       liveSnapshot = structuredClone(snapshot);
+      liveRich = false;
       signature = JSON.stringify([snapshot.presentationId, snapshot.slideId, snapshot.selectionIds]);
       const shapes = snapshot.selectionIds.length ? selected(snapshot) : [];
       status.textContent = `已选中 ${shapes.length} 个对象；最先选择的对象为间距基准。`;
@@ -568,7 +587,7 @@ export const panels = [{
         } catch (error) { if (!disposed) ctx.notify(error.message, 'error'); }
         finally { changePending = false; }
       });
-    });
+    }, { mode: 'selection' });
     try { await capture(); } catch (error) { ctx.notify(error.message, 'error'); }
     return () => { disposed = true; renderId++; unsubscribe(); container.replaceChildren(); };
   },

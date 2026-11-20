@@ -953,7 +953,7 @@ async function connect() {
     if (typeof host.onChanged === 'function') {
       state.hostUnsubscribe = host.onChanged(() => {
         scheduleSummary(350);
-      });
+      }, { mode: 'selection' });
     }
     mountSelectedPanel();
     setBusy(false);
@@ -1039,6 +1039,7 @@ function scheduleSummary(delay = 300) {
 
 async function refreshSummary({ manual = false } = {}) {
   if (!state.connected || !state.host || state.busy) return;
+  if (!manual && document.visibilityState === 'hidden') return;
   if (state.summaryPromise) return state.summaryPromise;
   const host = state.host;
   state.summaryPromise = (async () => {
@@ -1111,7 +1112,15 @@ function initPaneRequests() {
   document.addEventListener(EVENT_NAME, event => {
     applyTarget(event.detail?.target ?? event.detail);
   });
-  state.panePoll = setInterval(readPaneRequest, state.target === 'wps' ? 100 : 1200);
+  state.panePoll = setInterval(() => {
+    if (document.visibilityState === 'hidden') return;
+    readPaneRequest();
+  }, state.target === 'wps' ? 100 : 1200);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') return;
+    readPaneRequest();
+    scheduleSummary(100);
+  });
 }
 
 function consumeUrlTarget() {
