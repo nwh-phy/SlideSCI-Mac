@@ -598,3 +598,26 @@ test('a host container macOS refuses to open stops install and upgrade before an
     assert.equal((await fixture.launchCalls()).filter(line => line.startsWith('bootout')).length, 0, 'the running service is left alone');
   } finally { await chmod(data, 0o700).catch(() => {}); await rm(fixture.home, { recursive: true, force: true }); }
 });
+
+test('only a host app itself counts as running, not the extensions inside its bundle', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'slidesci-running-'));
+  const pkg = path.join(home, 'pkg');
+  const install = (processes, extra = []) => execFileSync(process.execPath, [path.join(pkg, 'mac/scripts/distribution.mjs'), 'install', '--profile', home, '--trust-certificate', 'no', '--clear-wef-cache', 'no', ...extra], {
+    env: { ...process.env, SLIDESCI_PROCESS_LIST: processes.join('\n') }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await mkdir(path.join(home, 'Library/Containers/com.microsoft.Powerpoint/Data/Documents/wef'), { recursive: true });
+    const jsaddons = path.join(home, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/.kingsoft/wps/jsaddons');
+    await mkdir(jsaddons, { recursive: true });
+    await writeFile(path.join(jsaddons, 'publish.xml'), '<jsplugins/>');
+    await makePackageFixture(pkg, { version: '0.2.1', manifestXml: '<OfficeApp><Version>1.2.0.0</Version></OfficeApp>' });
+    // Extensions that run without their app, as `ps -axo comm=` lists them.
+    const extensions = ['/Applications/Microsoft PowerPoint.app/Contents/PlugIns/PowerPointWidget_mac.appex/Contents/MacOS/PowerPointWidget_mac',
+      '/Applications/wpsoffice.app/Contents/PlugIns/WPSFinderMenu.appex/Contents/MacOS/WPSFinderMenu',
+      '/Applications/wpsoffice.app/Contents/PlugIns/WPSQuickLook.appex/Contents/MacOS/WPSQuickLook',
+      '/Applications/wpsoffice.app/Contents/MacOS/wpscli'];
+    assert.doesNotMatch(install(extensions), /正在运行/);
+    const apps = [...extensions, '/Applications/Microsoft PowerPoint.app/Contents/MacOS/Microsoft PowerPoint', '/Applications/wpsoffice.app/Contents/MacOS/wpsoffice'];
+    assert.match(install(apps, ['--upgrade', 'yes']), /检测到 PowerPoint、WPS 正在运行/);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});

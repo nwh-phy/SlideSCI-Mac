@@ -362,20 +362,21 @@ function certificateTrusted(file) {
   try { execFileSync(securityTool, ['verify-cert', '-c', file, '-p', 'ssl', '-n', 'localhost', '-L', '-q'], { stdio: 'ignore' }); return true; }
   catch { return false; }
 }
+// Only each host's main executable counts. Both bundles carry extensions that run on their own
+// (PowerPoint's widget; WPS's Finder menu, Quick Look, share and recent-files extensions), and
+// matching any path inside the bundle reported a host as running when it was not.
+const hostExecutables = [['PowerPoint', /\.app\/Contents\/MacOS\/Microsoft PowerPoint[ \t]*$/m], ['WPS', /\.app\/Contents\/MacOS\/wpsoffice[ \t]*$/m]];
 function runningHosts() {
   if (process.env.SLIDESCI_RUNNING_HOSTS !== undefined) {
     return process.env.SLIDESCI_RUNNING_HOSTS.split(',').map(item => item.trim()).filter(Boolean);
   }
-  if (profile !== path.resolve(os.homedir())) return [];
-  try {
-    const comms = run('/bin/ps', ['-axo', 'comm=']);
-    const hosts = [];
-    if (/Microsoft PowerPoint/i.test(comms)) hosts.push('PowerPoint');
-    if (/wpsoffice/i.test(comms)) hosts.push('WPS');
-    return hosts;
-  } catch {
-    return [];
+  // SLIDESCI_PROCESS_LIST stands in for `ps` output in tests.
+  let comms = process.env.SLIDESCI_PROCESS_LIST;
+  if (comms === undefined) {
+    if (profile !== path.resolve(os.homedir())) return [];
+    try { comms = run('/bin/ps', ['-axo', 'comm=']); } catch { return []; }
   }
+  return hostExecutables.filter(([, pattern]) => pattern.test(comms)).map(([name]) => name);
 }
 async function consent(question, optionName = '--trust-certificate') {
   const choice = option(optionName, null);
