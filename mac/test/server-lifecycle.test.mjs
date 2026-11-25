@@ -56,12 +56,12 @@ test('service lifecycle: loopback listeners, hello, removed grant route, cache s
     execFileSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2', '-subj', '/CN=localhost',
       '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1', '-keyout', path.join(tls, 'key.pem'), '-out', path.join(tls, 'cert.pem')], { stdio: 'ignore' });
     const ca = await readFile(path.join(tls, 'cert.pem'));
-    const cache = path.join(home, 'Library/Containers/com.microsoft.Powerpoint/Data/tmp/SlideSCI-Mac');
+    const cache = path.join(home, 'Library/Application Support/Microsoft/SlideSCI-Mac');
     await mkdir(cache, { recursive: true });
     const stale = path.join(cache, 'old-export.pdf'), video = path.join(cache, 'old-clip.mp4'), fresh = path.join(cache, 'fresh.png');
     for (const file of [stale, video, fresh]) await writeFile(file, 'x');
     // A host cache the service may not write (macOS refused access to that app's data).
-    const wpsCache = path.join(home, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/tmp/SlideSCI-Mac');
+    const wpsCache = path.join(home, 'Library/Logs/SlideSCI-Mac');
     await mkdir(wpsCache, { recursive: true });
     await chmod(wpsCache, 0o500);
     const twoDaysAgo = new Date(Date.now() - 2 * 86400000);
@@ -98,7 +98,7 @@ test('service lifecycle: loopback listeners, hello, removed grant route, cache s
       assert.equal(foreign.status, 403);
       const hello = await firstEvent(`${base}/api/events?token=${session.token}&host=powerpoint&client=pane-test-0001`);
       assert.deepEqual(hello, { type: 'hello', data: { instance: session.instance, leases: [] } });
-      assert.equal(await exists(stale), true, 'startup does not touch PowerPoint container files before an advanced action');
+      assert.equal(await exists(stale), true, 'startup does not touch the PowerPoint cache before an advanced action');
       assert.equal(await exists(video), true);
       assert.equal(await exists(fresh), true);
       const workDirs = (await readdir(os.tmpdir())).filter(name => name.startsWith(`slidesci-mac-${child.pid}-`));
@@ -111,7 +111,7 @@ test('service lifecycle: loopback listeners, hello, removed grant route, cache s
       if (child.exitCode === null) child.kill('SIGKILL');
     }
   } finally {
-    await chmod(path.join(home, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/tmp/SlideSCI-Mac'), 0o700).catch(() => {});
+    await chmod(path.join(home, 'Library/Logs/SlideSCI-Mac'), 0o700).catch(() => {});
     await rm(home, { recursive: true, force: true });
   }
 });

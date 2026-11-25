@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { safeFilename } from './storage.mjs';
+import { hostCacheDirectory, safeFilename } from './storage.mjs';
 
 const helperSource = fileURLToPath(new URL('../native/SlideSCI.swift', import.meta.url));
 const issuedFiles = new Set();
@@ -73,11 +73,7 @@ async function helper(action, input = {}) {
   const output = await processCall(await helperBinary(), [], JSON.stringify({ ...input, action }));
   return JSON.parse(output);
 }
-function hostContainer(host = 'powerpoint') {
-  const id = host === 'wps' ? 'com.kingsoft.wpsoffice.mac' : host === 'powerpoint' ? 'com.microsoft.Powerpoint' : null;
-  if (!id) throw new Error('Unknown presentation host.');
-  return path.join(homedir(), 'Library', 'Containers', id, 'Data', 'tmp', 'SlideSCI-Mac');
-}
+function hostContainer(host = 'powerpoint') { return hostCacheDirectory(host, homedir()); }
 const wpsPptxName = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.pptx$/;
 function wpsPptxReservations() {
   return path.join(homedir(), 'Library', 'Application Support', 'SlideSCI Mac', 'wps-pptx-reservations');
@@ -114,16 +110,15 @@ function shortName(name, limit = 180) {
   return (characters.join('') || 'media') + extension;
 }
 function safeName(name) { if (typeof name !== 'string' || !name || name === '.' || name === '..' || /[\x00-\x1f/\\:]/.test(name) || path.basename(name) !== name) throw new Error('Invalid output filename.'); return name; }
-// macOS asks before one app's process writes into another app's container; a denial must read as such.
+// The handoff folders are outside every app container, so a denial means the folder itself is unusable.
 function containerError(error, host) {
   if (!['EPERM', 'EACCES'].includes(error?.code)) return error;
   const name = host === 'wps' ? 'WPS' : 'PowerPoint';
-  return new Error(`macOS 拒绝访问 ${name} 的数据目录。请在“访问其他 App 的数据”提示中选择允许，或在“系统设置 → 隐私与安全性”中为运行 SlideSCI 服务的终端开启相应权限，然后重新运行 Start.command。`);
+  return new Error(`SlideSCI 后台服务无法读写与 ${name} 交换文件的文件夹 ${hostContainer(host).replace(homedir(), '~')}（${error.code}）。请检查该文件夹的权限后重试。`);
 }
 // Host caches hold intermediate copies only (exports, pasted pictures, style fragments, decks for
-// AppleScript); each is embedded or copied out within one operation. Startup never touches another
-// app's container, because that raises macOS's "access data from other apps" prompt at login. So a
-// cache is swept when this service first writes into it, then at most once a day while it runs.
+// AppleScript); each is embedded or copied out within one operation. A cache is swept when this
+// service first writes into it, then at most once a day while it runs.
 // Media is kept because a host may link a video instead of embedding it.
 const HOST_CACHE_AGE = 24 * 3600 * 1000;
 const keptMedia = /\.(?:mp4|m4v|mov|webm|avi|wmv|asf|mpe?g|mpe|mp3|wav|m4a|aac)$/i;

@@ -1,5 +1,7 @@
 ## Mac 0.2.1（未发布）
 
+- 后台服务与 PowerPoint、WPS 交换文件的文件夹移出两款软件的容器：PowerPoint 用 `~/Library/Application Support/Microsoft/SlideSCI-Mac`，WPS 用 `~/Library/Logs/SlideSCI-Mac`，都在各自沙盒允许读写的范围内。0.2.0 起服务作为登录项（node）运行，macOS 直接拒绝它写入其他 App 的容器，且不弹窗询问，导出页面、复制选中对象为图片、插入格式片段、公式与素材等功能因此全部失败；实机日志记录为 `file-write-create` 被拒。旧容器里的 `tmp/SlideSCI-Mac` 不再使用。
+- PowerPoint：图片类功能（比例尺、伪彩、放大图、导出原图、片段复制与插入）不再顺带用 AppleScript 读取文字光标。此前第一次使用就会弹出“node 想控制 Microsoft PowerPoint”，无人回答时 3 分钟后超时失败。
 - 暂存文件：PowerPoint、WPS 数据目录中的 SlideSCI 暂存文件（导出页面、粘贴图片、格式片段、AppleScript 中转文稿）重新定期清理。0.2.0 为避免登录时弹出“访问其他 App 的数据”提示取消了启动时清理，之后这些文件只增不减；现在服务首次写入某个宿主的目录时清理其中超过 24 小时的文件，服务持续运行时每天最多再清理一次，视频与音频保留。
 - 后台服务启动时不再在 PowerPoint、WPS 的容器中创建暂存目录：0.2.0 仍会创建，登录自启时可能因此弹出权限提示。现在首次用到某个宿主的暂存文件时才登记该宿主，并且只访问这一个宿主的目录。
 - 安装器显式清除安装副本的隔离标记（`com.apple.quarantine`）。浏览器下载解压后每个文件都带隔离标记，未签名的原生辅助程序带着标记运行会被 Gatekeeper 直接结束（退出码 137），插图、导出等原生功能全部失效。此前安装能用，是因为 Node 的异步复制恰好不保留该标记，`fs.cpSync` 等复制方式会保留。

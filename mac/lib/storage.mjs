@@ -14,6 +14,19 @@ const mimeByExtension = {
 };
 const extensionByMime = Object.fromEntries(Object.entries(mimeByExtension).map(([extension, mime]) => [mime, extension]));
 
+// Folders where the service hands files to a host and gets files back. Both hosts are sandboxed,
+// and macOS refuses the login-item service (node under launchd) any access to another app's
+// container or group container without even asking, so each folder sits where that host's own
+// sandbox entitlements reach: PowerPoint may read ~/Library/Application Support/Microsoft (and saves
+// there through AppleScript), and WPS may read and write ~/Library/Logs.
+export const hostCacheFolders = {
+  powerpoint: 'Library/Application Support/Microsoft/SlideSCI-Mac',
+  wps: 'Library/Logs/SlideSCI-Mac'
+};
+export function hostCacheDirectory(host, home = os.homedir()) {
+  if (!Object.hasOwn(hostCacheFolders, host)) throw new Error('Unknown presentation host.');
+  return path.join(home, hostCacheFolders[host]);
+}
 export function safeFilename(value, fallback = 'SlideSCI') {
   const name = String(value || fallback).replace(/[\\/\u0000-\u001f\u007f:]/g, '_').trim();
   if (!name || name === '.' || name === '..') return fallback;
@@ -33,16 +46,13 @@ export async function createFileServices(env) {
   const storageDir = path.join(os.homedir(), 'Library', 'Application Support', 'SlideSCI Mac');
   // The PID lets a later service tell an abandoned work folder from one still in use.
   const workDir = path.join(os.tmpdir(), `slidesci-mac-${process.pid}-${randomUUID()}`);
-  const hostDirs = {
-    powerpoint: path.join(os.homedir(), 'Library/Containers/com.microsoft.Powerpoint/Data/tmp/SlideSCI-Mac'),
-    wps: path.join(os.homedir(), 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/tmp/SlideSCI-Mac')
-  };
+  const hostDirs = Object.fromEntries(Object.keys(hostCacheFolders).map(host => [host, hostCacheDirectory(host)]));
   await fs.mkdir(storageDir, { recursive: true, mode: 0o700 });
   await fs.mkdir(workDir, { recursive: true, mode: 0o700 });
   const roots = [await fs.realpath(storageDir), await fs.realpath(workDir)];
   const grantedFiles = new Set(), grantedFolders = new Set();
   // The home folder may sit behind a symlink; host caches are matched in both spellings without
-  // resolving anything inside another app's container.
+  // resolving anything inside them.
   const home = os.homedir(), realHome = await fs.realpath(home).catch(() => home);
   async function hostDirectory(host) {
     if (!Object.hasOwn(hostDirs, host)) return workDir;
@@ -57,10 +67,9 @@ export async function createFileServices(env) {
     grantedFiles.add(resolved);
     return { path: resolved, name: path.basename(resolved), mime: mimeByExtension[path.extname(resolved).toLowerCase()] || 'application/octet-stream' };
   }
-  // A host cache is registered when a file inside it is first requested, never at startup: touching
-  // another app's container raises macOS's "access data from other apps" prompt, which must not
-  // appear when the login item starts. Only the container that holds the file is touched; a denial
-  // is reported by the host operation that needs the cache.
+  // A host cache is registered when a file inside it is first requested, never at startup, so the
+  // service creates no folder for a host that is not in use; a failure is reported by the host
+  // operation that needs the cache.
   async function hostRoot(target) {
     for (const host of Object.keys(hostDirs)) {
       const real = path.join(realHome, path.relative(home, hostDirs[host]));

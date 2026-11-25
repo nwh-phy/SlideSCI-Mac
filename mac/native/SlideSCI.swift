@@ -67,7 +67,8 @@ func interceptTIFF(_ pb: NSPasteboard, reason: String) {
         let converted = try png(data, contrast: true), saved = snapshot(pb), item = NSPasteboardItem()
         item.setData(converted, forType: .png)
         if reason == "drop" {
-            let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Containers/\(host)/Data/tmp/SlideSCI-Mac")
+            // Same handoff folders as lib/storage.mjs: the service may not write into the hosts' containers.
+            let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(host == "com.microsoft.Powerpoint" ? "Library/Application Support/Microsoft/SlideSCI-Mac" : "Library/Logs/SlideSCI-Mac")
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let destination = directory.appendingPathComponent("\(UUID().uuidString).png"); try converted.write(to: destination, options: .atomic)
             item.setString(destination.absoluteString, forType: .fileURL)
