@@ -342,7 +342,10 @@ export function startScientificReconciliation(ctx, onError = error => ctx.servic
 
 async function mountScale(container, ctx) {
   const toolbar = element('div'), load = element('button', '读取所选图片'), apply = element('button', '应用到所选图片'), sync = element('button', '同步当前页'), status = element('p', '', { role: 'status' }), fields = element('fieldset'), preview = element('canvas', null, { width: 600, height: 340 });
-  fields.append(element('legend', 'FOV 与可编辑比例尺')); toolbar.append(load, apply, sync); container.append(toolbar, fields, preview, status);
+  // Status sits under the buttons: below the form and preview its messages were out of view.
+  fields.append(element('legend', 'FOV 与可编辑比例尺')); toolbar.append(load, apply, sync); container.append(toolbar, status, fields, preview);
+  // Nothing to apply until a picture is read; draw() enables it once the FOV and settings are valid.
+  apply.disabled = true;
   const fovControls = { width: control(fields, '原图 FOV 宽度（0 为未标定）', 'number', 0), height: control(fields, '原图 FOV 高度（0 为未标定）', 'number', 0), unit: control(fields, 'FOV 单位', 'select', 'μm', unitOptions) };
   const controls = {
     vertical: control(fields, '纵向比例尺', 'checkbox', false), widthMicrometers: control(fields, '横向长度（μm，0 隐藏）', 'number', 50), heightMicrometers: control(fields, '纵向长度（μm，0 隐藏）', 'number', 50), lengthUnit: control(fields, '显示单位', 'select', 'μm', unitOptions), thicknessPoints: control(fields, '厚度（pt）', 'number', 3), showText: control(fields, '显示文字', 'checkbox', true), barColor: control(fields, '比例尺颜色', 'color', '#ffffff'), fontColor: control(fields, '文字颜色', 'color', '#ffffff'), fontName: control(fields, '字体', 'text', 'Arial'), fontSize: control(fields, '字号（pt）', 'number', 14), bold: control(fields, '加粗', 'checkbox', true), corner: control(fields, '位置', 'select', 'BottomRight', [{ value: 'TopLeft', label: '左上' }, { value: 'BottomLeft', label: '左下' }, { value: 'TopRight', label: '右上' }, { value: 'BottomRight', label: '右下' }]), groupWithImage: control(fields, '与图片组合', 'checkbox', true)
@@ -374,7 +377,7 @@ async function mountZoom(container, ctx) {
   const toolbar = element('div'), load = element('button', '读取所选图片/矩形'), add = element('button', '新增区域'), remove = element('button', '删除当前区域'), fit = element('button', '适合窗口'), apply = element('button', '应用全部区域'), sync = element('button', '同步当前页'), status = element('p', '滚轮缩放；空格/中键拖动平移；拖动绘制区域、内部移动、角点缩放；Delete 删除。', { role: 'status' });
   toolbar.append(load, add, remove, fit, apply, sync); const list = control(toolbar, '当前区域', 'select', '', []);
   const canvas = element('canvas', null, { width: 760, height: 460, tabIndex: 0 }); canvas.setAttribute('aria-label', '多个放大区域编辑画布'); canvas.setAttribute('role', 'application');
-  const fields = element('fieldset'); fields.append(element('legend', '每个区域独立设置')); container.append(toolbar, canvas, fields, status);
+  const fields = element('fieldset'); fields.append(element('legend', '每个区域独立设置')); container.append(toolbar, status, canvas, fields);
   const layoutPreview = element('canvas', null, { width: 760, height: 360 });
   layoutPreview.setAttribute('aria-label', '全部放大图、方向、辅助线和比例尺布局预览');
   container.insertBefore(layoutPreview, fields);

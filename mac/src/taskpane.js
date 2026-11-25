@@ -865,7 +865,9 @@ async function mountPanel(descriptor, { force = false } = {}) {
   entry.controller?.abort();
   const controller = new AbortController();
   entry.controller = controller;
-  entry.body.replaceChildren(panelPlaceholder('正在加载…'));
+  // Panels append their controls beside the placeholder, so it is removed once mounting finishes.
+  const placeholder = panelPlaceholder('正在加载…');
+  entry.body.replaceChildren(placeholder);
   const scoped = Object.create(state.services);
   scoped.request = (name, payload, options = {}) => state.services.request(name, payload, { ...options, signal: controller.signal });
   const ctx = makeContext(scoped, { signal: controller.signal, progress: message => updateProgress(message) });
@@ -875,6 +877,7 @@ async function mountPanel(descriptor, { force = false } = {}) {
       if (typeof cleanup === 'function') cleanup();
       return;
     }
+    placeholder.remove();
     entry.mounted = true;
     entry.cleanup = typeof cleanup === 'function' ? cleanup : null;
   } catch (error) {
