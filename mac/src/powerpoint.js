@@ -512,9 +512,10 @@ export async function connectPowerPoint(services) {
     if (!active) throw new Error('当前幻灯片已改变，请重试。');
     const model = { ...selection, width: parsed.width, height: parsed.height, shapes: active.shapes,
       slides: all ? parsed.slides : selection.slides };
-    // The change watch never needs the text cursor. Reading it runs AppleScript against the active
-    // window, which fails for every other open deck and would spawn a process every few seconds.
-    if (!options.watch) {
+    // Only text features need the text cursor. Reading it runs AppleScript against the active window:
+    // the change watch would spawn a process every few seconds and fail for every other open deck, and
+    // picture features would raise macOS's automation prompt for "node" although they never use it.
+    if (!options.watch && options.textSelection !== false) {
       model.textSelection = await native('textSelection', { context: { selectionIds: selection.selectionIds } });
       if (model.textSelection && !model.textSelection.shapeId) await PowerPoint.run(async context => {
         const shape = context.presentation.getSelectedTextRange().getParentTextFrame().getParentShape();
@@ -974,14 +975,14 @@ export async function connectPowerPoint(services) {
       return apply(commands);
     }),
     images: (ids, options = {}) => serial(async () => {
-      const source = await snapshot();
+      const source = await snapshot({ textSelection: false });
       const selected = ids.map(id => find(source.context, id));
       const images = await request('pptx/images', { ...options, ids: selected.map(shape => shape.packageId || shape.id), pptx: source.pptx, slideIndex: source.packageSlideIndex });
       const nativeIds = new Map(selected.map(shape => [shape.packageId || shape.id, shape.id]));
       return images.map(image => ({ ...image, id: nativeIds.get(image.id) }));
     }),
     fragment: ids => serial(async () => {
-      const source = await snapshot();
+      const source = await snapshot({ textSelection: false });
       const selected = ids.map(id => find(source.context, id));
       const fragment = await request('pptx/fragment', { ids: selected.map(shape => shape.packageId || shape.id), pptx: source.pptx, slideIndex: source.packageSlideIndex });
       const left = Math.min(...selected.map(shape => shape.left)), top = Math.min(...selected.map(shape => shape.top));
@@ -990,20 +991,20 @@ export async function connectPowerPoint(services) {
       return fragment;
     }),
     insertFragment: (fragment, options = {}) => serial(async () => {
-      const source = options.target ? { context: await geometryContext({ target: options.target }) } : await snapshot();
+      const source = options.target ? { context: await geometryContext({ target: options.target }) } : await snapshot({ textSelection: false });
       await native('insertFragment', { fragment, options, context: source.context,
         ...(options.target ? { slideId: source.context.slideId, documentUrl: Office.context.document.url } : {}) });
-      const result = options.readback === false ? undefined : (await snapshot()).context;
+      const result = options.readback === false ? undefined : (await snapshot({ textSelection: false })).context;
       emit(); return result;
     }),
     rasterizeImage: (id, options = {}) => serial(async () => {
-      const source = await snapshot();
+      const source = await snapshot({ textSelection: false });
       const shape = find(source.context, id);
       const fragment = await request('pptx/imageFragment', { pptx: source.pptx, id: shape.packageId || shape.id, slideIndex: source.packageSlideIndex, original: true });
       return native('rasterizeImage', { ...options, fragment });
     }),
     export: options => serial(async () => {
-      const source = await snapshot({ scope: options.kind === 'slides' ? 'presentation' : 'slide' });
+      const source = await snapshot({ scope: options.kind === 'slides' ? 'presentation' : 'slide', textSelection: false });
       let fragment;
       if (options.kind === 'selection') fragment = await request('pptx/fragment', {
         pptx: source.pptx, slideIndex: source.packageSlideIndex,

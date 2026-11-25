@@ -47,7 +47,7 @@ function restoreProperties(snapshot, shape) {
 }
 // Roll back a failed entry batch: remove objects created by the attempt, restore surviving originals and report direct replacements.
 async function rollbackSlide(ctx, before) {
-  const context = await ctx.host.context({ scope: 'slide' }), current = new Map();
+  const context = await ctx.host.context({ scope: 'slide', textSelection: false }), current = new Map();
   const walk = (items, parent) => { for (const shape of items) { current.set(shape.id, { shape, parent }); walk(shape.children || [], shape.id); } };
   walk(context.shapes || []);
   const replacement = new Map();
@@ -82,7 +82,7 @@ async function rollbackSlide(ctx, before) {
 async function applyScaleBarInternal(ctx, original, fov, settings) {
   validFov(fov);
   const s = { ...defaultScale, ...settings }, layout = scaleLayout(original, visibleFov(original, fov), s);
-  let key = await ensureUUID(ctx, original), context = await ctx.host.context({ scope: 'slide' }), source = findUUID(context, key);
+  let key = await ensureUUID(ctx, original), context = await ctx.host.context({ scope: 'slide', textSelection: false }), source = findUUID(context, key);
   if (!source) throw new Error('图片已不在当前幻灯片中。');
   const savedLinks = tag(source, RECORDS_TAG), originalGeometry = geometry(source), preservedTags = { ...source.tags, SLIDESCI_SCALE_CALIBRATION: serializeTag(visibleFov(original, fov)) };
   if (tag(source, 'SLIDESCI_SCALE_GROUP') === '1') {
@@ -250,7 +250,7 @@ async function applyZoomEntriesInternal(ctx, sources, entries) {
   const added = entries.filter(e => !e.key), errors = [];
   for (let index = 0; index < sources.length; index++) {
     const key = await ensureUUID(ctx, sources[index]);
-    let context = await ctx.host.context({ scope: 'slide' }), source = findUUID(context, key);
+    let context = await ctx.host.context({ scope: 'slide', textSelection: false }), source = findUUID(context, key);
     if (!source) { errors.push(`${sources[index].name}：图片已不在当前幻灯片中。`); continue; }
     const before = snapshotSlide(context);
     const old = recordsOf(source), target = index === 0 ? entries : [...old, ...added.map(e => ({ ...e, key: null, manualId: null }))];
@@ -284,7 +284,7 @@ async function applyZoomEntriesInternal(ctx, sources, entries) {
 
 export async function reconcileSlide(ctx) {
   return scientificMutation(ctx, async () => {
-    let context = await ctx.host.context({ scope: 'slide' });
+    let context = await ctx.host.context({ scope: 'slide', textSelection: false });
     context = await synchronizeUngroupedScale(ctx, context);
     const sources = context.shapes.filter(s => isImage(s) && tag(s, RECORDS_TAG));
     for (const initial of sources) {
@@ -364,7 +364,7 @@ async function mountScale(container, ctx) {
     g.restore();
   }
   fields.addEventListener('input', draw);
-  load.onclick = async () => { try { shapes = pictures(await ctx.host.context()); const fov = fovOf(shapes[0]) || { width: 0, height: 0, unit: 'μm' }; const saved = await ctx.services.request('images/settings', {}); setControls(fovControls, fov); setControls(controls, scaleOf(shapes[0]) || saved.scale || defaultScale); const rendered = await ctx.services.request('images/crop', { ...await imageFor(ctx, shapes[0]), region: { x: 0, y: 0, width: 1, height: 1, rotation: 0 }, maximum: 800 }); image = new Image(); image.onload = () => { if (!disposed) draw(); }; image.src = `data:${rendered.mime};base64,${rendered.data}`; draw(); } catch (error) { errorStatus(status, error); } };
+  load.onclick = async () => { try { shapes = pictures(await ctx.host.context({ textSelection: false })); const fov = fovOf(shapes[0]) || { width: 0, height: 0, unit: 'μm' }; const saved = await ctx.services.request('images/settings', {}); setControls(fovControls, fov); setControls(controls, scaleOf(shapes[0]) || saved.scale || defaultScale); const rendered = await ctx.services.request('images/crop', { ...await imageFor(ctx, shapes[0]), region: { x: 0, y: 0, width: 1, height: 1, rotation: 0 }, maximum: 800 }); image = new Image(); image.onload = () => { if (!disposed) draw(); }; image.src = `data:${rendered.mime};base64,${rendered.data}`; draw(); } catch (error) { errorStatus(status, error); } };
   apply.onclick = async () => { apply.disabled = true; try { if (!shapes.length) throw new Error('请先读取所选图片。'); const fov = validFov({ ...valuesOf(fovControls), source: '手动设置' }), s = valuesOf(controls); for (const shape of shapes) scaleLayout(shape, visibleFov(shape, fov), s); for (const shape of shapes) await applyScaleBar(ctx, shape, fov, s); status.textContent = `已更新 ${shapes.length} 张图片的 FOV 与比例尺。`; } catch (error) { errorStatus(status, error); } finally { apply.disabled = false; } };
   sync.onclick = async () => { sync.disabled = true; try { await reconcileSlide(ctx); status.textContent = '已同步当前页的比例尺与放大图。'; } catch (error) { errorStatus(status, error); } finally { sync.disabled = false; } };
   return () => { disposed = true; };
@@ -477,7 +477,7 @@ async function mountZoom(container, ctx) {
   async function reload({ refreshPreview = true } = {}) {
     load.disabled = true;
     try {
-      const context = await ctx.host.context(), items = selected(context), rectangle = items.filter(s => !isImage(s)); sources = items.filter(isImage);
+      const context = await ctx.host.context({ textSelection: false }), items = selected(context), rectangle = items.filter(s => !isImage(s)); sources = items.filter(isImage);
       if (!sources.length || rectangle.length > 1 || rectangle.length && sources.length !== 1 || rectangle.some(s => s.type !== 'shape' || s.shapeType && s.shapeType !== 'rectangle')) throw new Error('请选择一张或多张图片，或一张图片和一个普通矩形。');
       const saved = await ctx.services.request('images/settings', {}); entries = structuredClone(recordsOf(sources[0]));
       for (const entry of entries) { const marker = roles(context, entry.key, 'marker')[0]; if (marker) entry.region = relativeRegion(sources[0], marker); }
@@ -509,13 +509,13 @@ async function setImageFov(ctx, shape, fov) {
 }
 export const actions = [
   { id: 'science.setFov', label: '设置原图 FOV', section: '科学图片', fields: [{ name: 'width', label: '原图物理宽度（0 为未标定）', type: 'number', default: 0, min: 0 }, { name: 'height', label: '原图物理高度（0 为未标定）', type: 'number', default: 0, min: 0 }, { name: 'unit', label: '单位', type: 'select', default: 'μm', options: unitOptions }], run: (ctx, values) => scientificMutation(ctx, async () => {
-    const shapes = pictures(await ctx.host.context()), fov = validFov({ width: +values.width, height: +values.height, unit: values.unit, source: '手动设置' });
+    const shapes = pictures(await ctx.host.context({ textSelection: false })), fov = validFov({ width: +values.width, height: +values.height, unit: values.unit, source: '手动设置' });
     for (const shape of shapes) { const scale = scaleOf(shape); if (scale) scaleLayout(shape, visibleFov(shape, fov), scale); }
     for (const shape of shapes) await setImageFov(ctx, shape, fov);
     return { count: shapes.length };
   }) },
   { id: 'science.readFov', label: '重新读取 TIFF 标定', section: '科学图片', run: ctx => scientificMutation(ctx, async () => {
-    const shapes = pictures(await ctx.host.context()), calibrated = [];
+    const shapes = pictures(await ctx.host.context({ textSelection: false })), calibrated = [];
     for (const shape of shapes) {
       const sourceTag = tag(shape, 'SLIDESCI_SOURCE_PATH'), originalPath = (content(shape).alternativeText || '').split(/[\r\n]+/).filter(l => l.startsWith('原图路径：')).at(-1)?.slice('原图路径：'.length) || parse(sourceTag, sourceTag);
       // Read the recorded file directly; only fall back to native bytes when the object has no source path.

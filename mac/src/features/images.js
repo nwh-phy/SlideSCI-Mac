@@ -38,7 +38,7 @@ function availableName(name, used) { let value = name, i = 2; const dot = name.l
 export async function insertSourceFiles(ctx, files, { position, shapeIds = [] } = {}) {
   if (!files?.length) return { count: 0 };
   const updating = Array.isArray(shapeIds) && shapeIds.length > 0;
-  let context = await ctx.host.context({ scope: 'slide' });
+  let context = await ctx.host.context({ scope: 'slide', textSelection: false });
   const used = new Set(context.shapes.map(s => s.name.toLocaleLowerCase())), errors = [], inserted = [], directUpdates = [];
   let replaced = false;
   async function flushDirectUpdates() {
@@ -151,7 +151,7 @@ function copyTags(source, outer) {
 async function removeInserted(ctx, keys, error) {
   if (!keys.length) return;
   try {
-    const context = await ctx.host.context({ scope: 'slide' });
+    const context = await ctx.host.context({ scope: 'slide', textSelection: false });
     const ids = flatten(context.shapes).filter(shape => keys.includes(tag(shape, UUID_TAG))).map(shape => shape.id);
     if (ids.length) await ctx.host.apply([{ op: 'delete', ids }]);
   } catch (cleanup) { error.message += `；清理新插入的伪彩图失败：${cleanup.message}`; }
@@ -208,7 +208,7 @@ export async function applyPseudoColors(ctx, shapes, colors, keepOriginal = fals
   return { count: shapes.length };
 }
 async function mergeChannels(ctx) {
-  const context = await ctx.host.context(), shapes = pictures(context, 2, 7), first = shapes[0], aspect = content(first).width / content(first).height;
+  const context = await ctx.host.context({ textSelection: false }), shapes = pictures(context, 2, 7), first = shapes[0], aspect = content(first).width / content(first).height;
   if (shapes.some(s => Math.abs((content(s).width / content(s).height) / aspect - 1) > .005)) throw new Error('各通道可见画面的宽高比必须一致；合并按画面坐标叠加，不自动配准。');
   if (shapes.some(s => Math.abs(((s.rotation - first.rotation + 540) % 360) - 180) > .01)) throw new Error('各通道图片的旋转角度必须一致。');
   let calibration = null;
@@ -260,7 +260,7 @@ async function mountPseudo(container, ctx) {
       preview(index, state, ownGeneration).catch(error => { status.textContent = error.message; });
     });
   }
-  reload.onclick = async () => { try { shapes = pictures(await ctx.host.context()); images = await imagesFor(ctx, shapes); const saved = await ctx.services.request('images/settings', {}); colors = shapes.map((s, i) => saved.pseudoColor || (rawPseudoColor(s) ? normalizePseudo(rawPseudoColor(s)) : colorPresets[i % 7].value)); render(); status.textContent = `已读取 ${shapes.length} 张图片。`; } catch (error) { status.textContent = error.message; } };
+  reload.onclick = async () => { try { shapes = pictures(await ctx.host.context({ textSelection: false })); images = await imagesFor(ctx, shapes); const saved = await ctx.services.request('images/settings', {}); colors = shapes.map((s, i) => saved.pseudoColor || (rawPseudoColor(s) ? normalizePseudo(rawPseudoColor(s)) : colorPresets[i % 7].value)); render(); status.textContent = `已读取 ${shapes.length} 张图片。`; } catch (error) { status.textContent = error.message; } };
   // Rows already showing the active color keep their rendered preview instead of re-running the render service.
   applyAll.onclick = () => {
     if (!colors.length) return;
@@ -278,7 +278,7 @@ export const actions = [
   { id: 'images.insert', label: '插入图片并记录来源', section: '图片', run: async ctx => insertSourceFiles(ctx, await ctx.services.pickFiles({ kind: 'images', multiple: true })) },
   { id: 'images.insertVideo', label: '插入视频并记录来源', section: '图片', run: async ctx => insertSourceFiles(ctx, await ctx.services.pickFiles({ kind: 'video', multiple: true })) },
   { id: 'images.pasteFiles', label: '粘贴图片或视频文件', section: '图片', run: async ctx => { const files = await ctx.services.readClipboardFiles(); if (!files?.length) throw new Error('剪贴板中没有图片或视频文件。'); return insertSourceFiles(ctx, files); } },
-  { id: 'images.reveal', label: '打开原图或视频所在位置', section: '图片', run: async ctx => { const items = selected(await ctx.host.context()); if (items.length !== 1) throw new Error('请选择一个图片或视频对象。'); const path = sourcePath(items[0]); if (!path?.startsWith('/') || /[\0\r\n]/.test(path)) throw new Error('该对象没有有效的原始文件路径。'); await ctx.services.reveal(path); } },
+  { id: 'images.reveal', label: '打开原图或视频所在位置', section: '图片', run: async ctx => { const items = selected(await ctx.host.context({ textSelection: false })); if (items.length !== 1) throw new Error('请选择一个图片或视频对象。'); const path = sourcePath(items[0]); if (!path?.startsWith('/') || /[\0\r\n]/.test(path)) throw new Error('该对象没有有效的原始文件路径。'); await ctx.services.reveal(path); } },
   { id: 'images.merge', label: '合并通道', section: '图片', description: '2–7 个通道进行 RGB 饱和相加；保留原图，不自动配准。', run: mergeChannels }
 ];
 export const panels = [{ id: 'images.pseudoColor', label: '伪彩预览与设置', section: '图片', mount: mountPseudo }];
