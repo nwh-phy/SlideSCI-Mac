@@ -40,7 +40,7 @@ PowerPoint 在不含旧开发加载项引用的新建文稿中完成 19 项核�
 
 ## 问题反馈
 
-Mac 版问题请在 [SlideSCI-Mac Issues](https://github.com/nwh-phy/SlideSCI-Mac/issues) 反馈，附上 macOS、PowerPoint 或 WPS 版本，以及安装器状态目录中的 `service.log`。原版 Windows 插件的作者不维护 Mac 版。
+Mac 版问题请在 [SlideSCI-Mac Issues](https://github.com/nwh-phy/SlideSCI-Mac/issues) 反馈，附上 macOS、PowerPoint 或 WPS 版本，以及安装器状态目录中的 `service.log`（每条带时间，并记录版本与出错的操作；家目录已写作 `~`，发出前仍请检查其中的文件名）。原版 Windows 插件的作者不维护 Mac 版。
 
 ## 来源与校验
 

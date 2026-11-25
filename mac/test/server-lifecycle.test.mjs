@@ -158,3 +158,54 @@ test('under launchd a taken port exits cleanly, and the service rotates its own 
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test('service.log lines carry a timestamp and the version, and record failures without the home folder or token', { timeout: 60000 }, async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'slidesci-log-'));
+  const version = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
+  const httpPort = await freePort();
+  const child = spawn(process.execPath, [server], {
+    env: { ...process.env, HOME: home, SLIDESCI_HTTP_PORT: String(httpPort), SLIDESCI_ACCEPTANCE: '', SLIDESCI_SUPERVISOR: '' },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { output += chunk; });
+  const exited = new Promise(resolve => child.on('exit', code => resolve(code)));
+  const waitFor = async (pattern, what) => {
+    const deadline = Date.now() + 15000;
+    while (!pattern.test(output)) {
+      if (Date.now() > deadline || child.exitCode !== null) throw new Error(`no ${what} in service output:\n${output}`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  };
+  try {
+    await waitFor(new RegExp(`SlideSCI ${version.replaceAll('.', '\\.')} 已启动（进程 ${child.pid}，Node v[\\d.]+，macOS [\\d.]+，手动启动）`), 'startup line');
+    const base = `http://127.0.0.1:${httpPort}`;
+    const { token } = JSON.parse((await request(base + '/api/session')).text);
+    const post = (route, payload) => request(base + route, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-SlideSCI-Token': token }, body: JSON.stringify(payload) });
+
+    const failed = await post(`/api/pptx/parse?token=${token}`, { pptx: 'not a presentation' });
+    assert.equal(failed.status, 400);
+    await waitFor(/POST \/api\/pptx\/parse 失败：/, 'failed request');
+
+    const report = { message: `导出失败：${home}/Documents/组会.pptx`, name: 'Error', host: 'powerpoint', version, context: { operation: 'export' },
+      stack: `Error: 导出失败\n    at exportSlides (https://localhost:3443/src/features/export.js:10:5)\n    at run (https://localhost:3443/src/taskpane.js:812:7)` };
+    for (let i = 0; i < 3; i++) assert.equal((await post('/api/client/error', report)).status, 200);
+    await post('/api/client/error', { ...report, message: '另一处错误', stack: '' });
+    await waitFor(/另一处错误/, 'second pane error');
+    assert.match(output, new RegExp(`界面错误（powerpoint ${version.replaceAll('.', '\\.')} export）：导出失败：~/Documents/组会\\.pptx \\| at exportSlides \\(https://localhost:3443/src/features/export\\.js:10:5\\) \\| at run`));
+    assert.match(output, /（上一条又出现 2 次）\n.*另一处错误/, 'a repeated error is counted, not written again');
+    assert.equal(output.split('导出失败：~/Documents').length - 1, 1);
+    assert.equal(output.includes(home), false, 'the home folder is written as ~');
+    assert.equal(output.includes(token), false, 'the session token never reaches the log');
+
+    child.kill('SIGTERM');
+    assert.equal(await exited, 0);
+    const lines = output.trim().split('\n');
+    assert.match(lines.at(-1), /SlideSCI 已停止（SIGTERM）/);
+    for (const line of lines) assert.match(line, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \S/, `every log line is timestamped: ${line}`);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGKILL');
+    await rm(home, { recursive: true, force: true });
+  }
+});
