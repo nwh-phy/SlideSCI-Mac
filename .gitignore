@@ -8,3 +8,4 @@ pnpm-lock.yaml
 PPT介绍/
 artifacts/
 .signing/
+.DS_Store

@@ -1,6 +1,6 @@
 # SlideSCI Mac 0.2.1 安装与发行说明
 
-此 ZIP 面向 Apple Silicon Mac，内置 Node.js 24.22.3、生产依赖及 Swift 原生辅助程序。使用者无需安装 Node.js、Python 或 Xcode。原生程序按 macOS 14 最低版本构建；较早系统及 Intel Mac 安装包未验证。PowerPoint 需要 PowerPointApi 1.10（Mac 16.105 起）及 SharedRuntime 1.1；Office.js 首次加载需要访问微软 CDN。
+此 ZIP 面向 Apple Silicon Mac，内置 Node.js 24.22.3、生产依赖及 Swift 原生辅助程序。使用者无需安装 Node.js、Python 或 Xcode。原生程序按 macOS 14 最低版本构建，安装器和各 `.command` 在更早的系统上直接说明并退出；Intel Mac 未验证。PowerPoint 需要 PowerPointApi 1.10（Mac 16.105 起）及 SharedRuntime 1.1；Office.js 首次加载需要访问微软 CDN。
 
 侧栏页面由本机服务提供：WPS 页面访问 `http://127.0.0.1:3000`，PowerPoint 页面访问 `https://localhost:3443`，不监听局域网。PowerPoint 侧栏另需联网从微软 CDN 加载 Office.js，断网时可能无法打开；WPS 不受影响。`Install.command` 会自动安装并启用 macOS LaunchAgent（`~/Library/LaunchAgents/com.slidesci.mac.service.plist`），随系统登录静默运行，重启电脑后无需再手动运行 `Start.command` 或保留终端窗口。
 
@@ -15,7 +15,7 @@
 5. PowerPoint：PowerPoint 只通过受 macOS 信任的 HTTPS 加载 SlideSCI。安装时会为本机生成独立的 `localhost` 证书和私钥（有效期 825 天），保存在 `~/Library/Application Support/SlideSCI-Mac-Installer/tls/`，私钥只保存在本机。安装器会询问是否信任该证书（仅用于 `localhost` 的 SSL，不创建 CA）；同意后输入登录密码即完成。证书剩余 30 天内可运行 `RenewCertificate.command` 换新。
 6. 保存工作并 `Cmd+Q` 重开 PowerPoint，从“开始 → 加载项 → 更多加载项 → 开发人员加载项”双击 `SlideSCI Mac`。如安装时未退出 PowerPoint 导致升级后功能区仍显示旧版或找不到插件，先 `Cmd+Q` 退出 PowerPoint 并删除 `~/Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef` 后重开即可。
 
-ZIP 和原生辅助程序尚无 Developer ID 签名及 Apple 公证。Gatekeeper 可能阻止首次打开；确认来源后在系统设置“隐私与安全性”中允许该文件即可。
+ZIP 和原生辅助程序尚无 Developer ID 签名及 Apple 公证。Gatekeeper 可能阻止首次打开；确认来源后在系统设置“隐私与安全性”中允许该文件即可。浏览器下载解压后的文件都带隔离标记，未签名的原生辅助程序直接运行会被系统结束；安装器在安装副本上清除这一标记，所以只需允许一次 `Install.command`，不必逐个放行包内文件。
 
 服务启动采用完全惰性策略，不会主动探测 PowerPoint/WPS 容器目录或弹出权限窗；仅当你首次触发需要文件/自动化的高级功能时，macOS 才可能按需请求相应权限。本版本已移除 AI 助手功能。
 
@@ -34,7 +34,7 @@ PowerPoint 在不含旧开发加载项引用的新建文稿中完成 19 项核�
 
 隔离安装验证覆盖宿主注册与备份、生产依赖、原生辅助程序、实际内容转换、端口冲突、PID 归属、停止服务及卸载恢复。当前发行的检查结果见同一 Release 中的 `INSTALL-VERIFICATION.json`。全新 macOS 账户的 Gatekeeper、权限提示，以及安装器触发的证书信任授权窗口尚未实机验证；安装包没有 Apple 公证。
 
-服务启动仅清理本服务在系统临时目录中残留的旧工作目录，导出完成后立即删除中间 PPTX 与 PDF。侧栏与服务断开后自动重连；在开启“剪贴板 / 拖入自动识别”时，服务重启后侧栏会自动恢复监听，侧栏关闭或宿主退出 60 秒后监听自动停止。
+服务启动仅清理本服务在系统临时目录中残留的旧工作目录，导出完成后立即删除中间 PPTX 与 PDF。PowerPoint、WPS 数据目录中的 SlideSCI 暂存文件（导出页面、粘贴图片、格式片段）在服务首次写入该目录时清理超过 24 小时的部分，服务持续运行时每天最多再清理一次；视频与音频保留。侧栏与服务断开后自动重连；在开启“剪贴板 / 拖入自动识别”时，服务重启后侧栏会自动恢复监听，侧栏关闭或宿主退出 60 秒后监听自动停止。
 
 不将浏览器预览、HTTP 200 或构建成功视为宿主功能通过。字体缺失可能影响显示；源图片路径在另一台机器上未必存在；多选顺序取决于宿主返回顺序。
 
@@ -48,4 +48,4 @@ Mac 版问题请在 [SlideSCI-Mac Issues](https://github.com/nwh-phy/SlideSCI-Ma
 
 同目录 `.zip.sha256` 用于核对下载文件。仅执行 `shasum -a 256 -c 文件名.zip.sha256` 不会安装软件。
 
-开发者构建：在有 Node.js、npm 与 Xcode Command Line Tools 的 Apple Silicon Mac 上安装 `mac/` 的锁定依赖后，执行 `node mac/scripts/distribution.mjs build`。构建器校验官方 Node 归档，安装锁定生产依赖，编译原生程序并生成 ZIP 与 SHA-256。随后执行 `node mac/scripts/verify-package.mjs 安装包.zip --report INSTALL-VERIFICATION.json`，在隔离目录中检查包内容、内置运行时、原生程序、公式转换、安装注册、过期服务记录、证书换新和卸载恢复；3000/3443 端口空闲时还会检查服务启动与停止。
+开发者构建：在有 Node.js、npm 与 Xcode Command Line Tools 的 Apple Silicon Mac 上安装 `mac/` 的锁定依赖后，执行 `node mac/scripts/distribution.mjs build`。构建器校验官方 Node 归档，安装锁定生产依赖，编译原生程序并生成 ZIP 与 SHA-256。随后执行 `node mac/scripts/verify-package.mjs 安装包.zip --previous 上一版安装包.zip --report INSTALL-VERIFICATION.json`，在隔离目录中检查包内容、内置运行时、原生程序、公式转换、安装注册、过期服务记录、证书换新、卸载恢复、带隔离标记的下载副本，以及从上一版原地升级再卸载；3000/3443 端口空闲时还会检查服务启动与停止。`--strict` 把跳过的检查算作失败。仓库的 GitHub Actions（`.github/workflows/mac.yml`）在每次改动 Mac 版时运行单元测试，并在干净的 Apple Silicon 环境中构建安装包、以 `--strict` 完成上述验证（从最近一次 `mac-v*` 发布升级），验证后的 ZIP 与报告作为工作流附件保留 14 天。
