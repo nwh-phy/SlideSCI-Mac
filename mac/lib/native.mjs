@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { access, chmod, lstat, mkdir, readFile, realpath, stat, writeFile, rename, rm } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readdir, readFile, realpath, stat, writeFile, rename, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -63,7 +63,7 @@ async function helperBinary() {
     try { await access(binary, constants.X_OK); return binary; } catch (error) { if (error.code !== 'ENOENT' && error.code !== 'EACCES') throw error; }
     const temporary = `${binary}-${randomUUID()}`;
     try {
-      await processCall('/usr/bin/xcrun', ['swiftc', '-O', '-swift-version', '5', helperSource, '-o', temporary, '-framework', 'AppKit', '-framework', 'Security', '-framework', 'PDFKit', '-framework', 'CoreImage', '-framework', 'ApplicationServices', '-framework', 'AVFoundation', '-framework', 'UniformTypeIdentifiers'], '', { timeout: 180000 });
+      await processCall('/usr/bin/xcrun', ['swiftc', '-O', '-swift-version', '5', helperSource, '-o', temporary, '-framework', 'AppKit', '-framework', 'PDFKit', '-framework', 'CoreImage', '-framework', 'ApplicationServices', '-framework', 'AVFoundation', '-framework', 'UniformTypeIdentifiers'], '', { timeout: 180000 });
       await chmod(temporary, 0o700); await rename(temporary, binary); return binary;
     } finally { await rm(temporary, { force: true }); }
   })().catch((error) => { compiling = undefined; throw error; });
@@ -120,8 +120,44 @@ function containerError(error, host) {
   const name = host === 'wps' ? 'WPS' : 'PowerPoint';
   return new Error(`macOS 拒绝访问 ${name} 的数据目录。请在“访问其他 App 的数据”提示中选择允许，或在“系统设置 → 隐私与安全性”中为运行 SlideSCI 服务的终端开启相应权限，然后重新运行 Start.command。`);
 }
+// Host caches hold intermediate copies only (exports, pasted pictures, style fragments, decks for
+// AppleScript); each is embedded or copied out within one operation. Startup never touches another
+// app's container, because that raises macOS's "access data from other apps" prompt at login. So a
+// cache is swept when this service first writes into it, then at most once a day while it runs.
+// Media is kept because a host may link a video instead of embedding it.
+const HOST_CACHE_AGE = 24 * 3600 * 1000;
+const keptMedia = /\.(?:mp4|m4v|mov|webm|avi|wmv|asf|mpe?g|mpe|mp3|wav|m4a|aac)$/i;
+const hostCacheSweeps = new Map();
+async function sweepHostCache(directory, host) {
+  const cutoff = Date.now() - HOST_CACHE_AGE;
+  const actual = await realpath(directory);
+  for (const name of await readdir(actual)) {
+    if (keptMedia.test(name)) continue;
+    const file = path.join(actual, name);
+    try {
+      if ((await lstat(file)).mtimeMs >= cutoff) continue;
+      await rm(file, { recursive: true, force: true });
+      for (const value of [file, path.join(directory, name)]) { issuedFiles.delete(value); reservedFiles.delete(value); }
+      if (host === 'wps' && wpsPptxName.test(name)) await rm(path.join(wpsPptxReservations(), name), { force: true });
+    } catch { /* best effort: a file in use or already gone is retried by the next sweep */ }
+  }
+}
+async function hostCache(host) {
+  const directory = hostContainer(host);
+  await mkdir(directory, { recursive: true, mode: 0o700 }).catch((error) => { throw containerError(error, host); });
+  const last = hostCacheSweeps.get(directory);
+  if (!last || Date.now() - last.at >= HOST_CACHE_AGE) {
+    // Runs beside the current operation; it only removes files a day old, never the ones being written.
+    hostCacheSweeps.set(directory, { at: Date.now(), done: sweepHostCache(directory, host).catch(() => {}) });
+  }
+  return directory;
+}
+// A dropped TIFF is converted by the watcher straight into the frontmost host's cache.
+const cacheHosts = { 'com.microsoft.Powerpoint': 'powerpoint', 'com.kingsoft.wpsoffice.mac': 'wps' };
+// Lets tests wait for the sweeps that earlier writes started.
+export function hostCacheSweepsSettled() { return Promise.all([...hostCacheSweeps.values()].map(sweep => sweep.done)); }
 async function materialize({ data, mime = 'application/octet-stream', name, host = 'powerpoint' }) {
-  const directory = hostContainer(host); await mkdir(directory, { recursive: true, mode: 0o700 }).catch((error) => { throw containerError(error, host); });
+  const directory = await hostCache(host);
   const base = shortName(name ? safeName(name) : 'media');
   const filename = `${randomUUID()}-${base}${path.extname(base) ? '' : extensions[mime] || '.bin'}`;
   const output = path.join(directory, filename); await writeFile(output, decode(data), { mode: 0o600, flag: 'wx' }).catch((error) => { throw containerError(error, host); }); issuedFiles.add(await realpath(output)); return { path: output, name: name || path.basename(output), mime };
@@ -139,8 +175,7 @@ async function readIssued({ path: filename }, env) { const actual = await author
 async function nativeAsset(input, env) {
   if (!input.path) return (await materialize({ ...input, host: 'powerpoint' })).path;
   const filename = await authorizeFile(input.path, env);
-  await mkdir(hostContainer('powerpoint'), { recursive: true, mode: 0o700 });
-  const directory = await realpath(hostContainer('powerpoint'));
+  const directory = await realpath(await hostCache('powerpoint'));
   if (filename.startsWith(directory + path.sep)) return filename;
   return (await materialize({ data: (await readFile(filename)).toString('base64'), mime: input.mime || mimeTypes[path.extname(filename).toLowerCase()], name: path.basename(filename), host: 'powerpoint' })).path;
 }
@@ -467,7 +502,7 @@ async function waitForFile(filename, timeout = 10000) {
   }
   throw new Error('PowerPoint did not finish writing the exported file.');
 }
-async function temporaryPath(extension, host = 'powerpoint') { const directory = hostContainer(host); await mkdir(directory, { recursive: true, mode: 0o700 }); return path.join(directory, `${randomUUID()}.${extension}`); }
+async function temporaryPath(extension, host = 'powerpoint') { const directory = await hostCache(host); return path.join(directory, `${randomUUID()}.${extension}`); }
 async function descriptor(filename, mime) { issuedFiles.add(await realpath(filename)); return { path: filename, name: path.basename(filename), mime, data: (await readFile(filename)).toString('base64') }; }
 async function insertFragment(input, env) {
   const fragment = input.fragment || input;
@@ -664,7 +699,7 @@ async function exportPresentationFiles(input, env, scratch) {
   return result;
 }
 // Intermediate copies (packaged deck, rendered PDF, captured fragment) are removed as soon as
-// the files handed back to the caller exist; returned files stay until the cache sweep.
+// the files handed back to the caller exist; returned files stay until the daily host cache sweep.
 async function exportPresentation(input, env) {
   const scratch = [];
   let result;
@@ -756,7 +791,7 @@ async function watchStart(input = {}, env = {}) {
   child.stdin.end(JSON.stringify({ ...input, action: 'watch' }));
   child.stderr.on('data', (chunk) => { if (errors.length < 4096) errors += chunk.toString('utf8'); });
   child.on('error', (error) => settleReady(error));
-  child.stdout.on('data', (chunk) => { buffer += chunk.toString('utf8'); let newline; while ((newline = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); try { const event = JSON.parse(line); if (event.type === 'ready') settleReady(null, { id, ...event }); else if (!shouldSuppressWatchEvent(event)) { for (const file of event.files || []) issuedFiles.add(path.resolve(file.path)); env.events?.emit?.(event.type === 'nativeError' ? 'nativeError' : event.type === 'hostChanged' ? 'changed' : 'mediaSource', event); } } catch (error) { env.events?.emit?.('nativeError', { message: error.message }); } } });
+  child.stdout.on('data', (chunk) => { buffer += chunk.toString('utf8'); let newline; while ((newline = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); try { const event = JSON.parse(line); if (event.type === 'ready') settleReady(null, { id, ...event }); else if (!shouldSuppressWatchEvent(event)) { if (event.reason === 'drop' && Object.hasOwn(cacheHosts, event.host || '')) hostCache(cacheHosts[event.host]).catch(() => {}); for (const file of event.files || []) issuedFiles.add(path.resolve(file.path)); env.events?.emit?.(event.type === 'nativeError' ? 'nativeError' : event.type === 'hostChanged' ? 'changed' : 'mediaSource', event); } } catch (error) { env.events?.emit?.('nativeError', { message: error.message }); } } });
   child.on('close', (code) => { watches.delete(id); if (!readySettled) settleReady(new Error(errors || 'Native watcher exited before start.')); else if (code && !child.slideSciStopping) env.events?.emit?.('nativeError', { message: errors || 'Native watcher exited.' }); });
   watches.set(id, child); return ready;
 }
@@ -769,9 +804,6 @@ export const nativeHandlers = {
   fonts: async () => helper('fonts'),
   readClipboardFiles: async () => { const result = await helper('readClipboardFiles'); for (const file of result) issuedFiles.add(await realpath(file.path)); return result; },
   writeClipboard: async (input) => noteClipboardWrite(await helper('writeClipboard', input)),
-  keychainGet: async ({ account }) => helper('keychainGet', { account, service: 'SlideSCI.AI' }),
-  keychainSet: async ({ account, secret }) => { if (typeof secret !== 'string') throw new Error('A keychain secret string is required.'); return helper('keychainSet', { account, secret, service: 'SlideSCI.AI' }); },
-  keychainDelete: async ({ account }) => helper('keychainDelete', { account, service: 'SlideSCI.AI' }),
   materialize: input => materialize(input),
   read: async (input, env) => env?.files?.read ? env.files.read(input.path) : readIssued(input, env),
   write: async (input, env) => env?.files?.write ? env.files.write(input) : writeIssued(input),

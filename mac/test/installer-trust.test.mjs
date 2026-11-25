@@ -542,3 +542,29 @@ test('upgrades keep one previous folder, ask before clearing the Wef cache, and 
     assert.match(plist, /<key>SLIDESCI_LOG_FILE<\/key><string>[^<]*service\.log<\/string>/);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
+
+test('a browser-downloaded package installs without the quarantine mark, so Gatekeeper does not kill the native helper', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'slidesci-quarantine-'));
+  const pkg = path.join(home, 'downloaded package');
+  const quarantined = ['BUILD-INFO.json', 'runtime/bin/node', 'mac/bin/slidesci-native', 'mac/scripts/distribution.mjs', 'mac/office/manifest.xml'];
+  const mark = file => execFileSync('/usr/bin/xattr', ['-p', 'com.apple.quarantine', file], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  const marked = file => { try { mark(file); return true; } catch { return false; } };
+  try {
+    await mkdir(path.join(home, 'Library/Containers/com.microsoft.Powerpoint/Data/Documents/wef'), { recursive: true });
+    await makePackageFixture(pkg, { version: '0.2.1', manifestXml: '<OfficeApp><Version>1.2.0.0</Version></OfficeApp>' });
+    await mkdir(path.join(pkg, 'mac/bin'), { recursive: true });
+    await writeFile(path.join(pkg, 'mac/bin/slidesci-native'), '#!/bin/sh\nexit 0\n');
+    await chmod(path.join(pkg, 'mac/bin/slidesci-native'), 0o755);
+    // What Safari and Archive Utility leave on every extracted file (the linked node_modules stays untouched).
+    for (const file of quarantined) execFileSync('/usr/bin/xattr', ['-w', 'com.apple.quarantine', `0083;${Math.floor(Date.now() / 1000).toString(16)};Safari;`, path.join(pkg, file)]);
+    assert.ok(quarantined.every(file => marked(path.join(pkg, file))), 'the fixture is quarantined like a download');
+
+    const output = execFileSync(process.execPath, [path.join(pkg, 'mac/scripts/distribution.mjs'), 'install', '--profile', home, '--trust-certificate', 'no'], {
+      env: { ...process.env, SLIDESCI_RUNNING_HOSTS: '' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+    });
+    assert.match(output, /SlideSCI 已安装/);
+    const application = path.join(home, 'Library/Application Support/SlideSCI-Mac');
+    for (const file of quarantined) assert.equal(marked(path.join(application, file)), false, `${file} is installed without quarantine`);
+    assert.ok(marked(path.join(pkg, 'mac/bin/slidesci-native')), 'the downloaded folder itself is left as it was');
+  } finally { await rm(home, { recursive: true, force: true }); }
+});

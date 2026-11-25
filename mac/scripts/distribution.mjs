@@ -168,20 +168,9 @@ async function stop({ keepAutostart = false } = {}) {
   }
   throw new Error('服务尚未退出；保留记录，不强制结束。');
 }
-// The service writes into each host's own cache; macOS asks before Terminal touches another app's
-// data. Probing here makes that prompt appear in this window and names a refusal plainly.
+// The installer writes host registrations inside each app's container, and macOS asks before Terminal
+// touches another app's data; a refusal is named plainly instead of as a bare EPERM.
 const accessHelp = names => `macOS 拒绝“终端”访问 ${names.join('、')} 的数据，SlideSCI 的插入、格式与导出等功能将无法使用。出现“访问其他 App 的数据”提示时请选择允许；如果之前拒绝过，请在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”中打开“终端”，然后重新运行此命令。`;
-async function deniedHosts() {
-  const denied = [];
-  for (const [name, id] of [['PowerPoint', 'com.microsoft.Powerpoint'], ['WPS', 'com.kingsoft.wpsoffice.mac']]) {
-    const container = path.join(profile, 'Library/Containers', id, 'Data');
-    if (!await exists(container)) continue;
-    const directory = path.join(container, 'tmp/SlideSCI-Mac'), probe = path.join(directory, `.slidesci-access-${process.pid}`);
-    try { await fs.mkdir(directory, { recursive: true, mode: 0o700 }); await fs.writeFile(probe, ''); await fs.rm(probe, { force: true }); }
-    catch (error) { if (['EPERM', 'EACCES'].includes(error.code)) denied.push(name); }
-  }
-  return denied;
-}
 function permissionMessage(error) {
   if (!['EPERM', 'EACCES'].includes(error?.code)) return error?.message;
   const where = String(error.path || error.message);
@@ -502,8 +491,11 @@ async function prunePreviousVersions(keep) {
   }
   if (removed.length) console.log(`已删除更早的旧版本备份：${removed.join('、')}`);
 }
+// The native helper is built for macOS 14 (Darwin 23); on an older system it cannot load.
+const MINIMUM_DARWIN = 23;
 async function install() {
   if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('此安装包仅适用于 Apple Silicon Mac。Intel Mac 请使用源码开发流程；尚未实机验证。');
+  if (Number(os.release().split('.')[0]) < MINIMUM_DARWIN) throw new Error('此安装包需要 macOS 14 或更高版本。');
   if (path.resolve(root) === application) throw new Error('请从解压后的发行目录运行安装器。');
   if (!await exists(path.join(root, 'BUILD-INFO.json')) || !await exists(path.join(root, 'runtime/bin/node'))) throw new Error('请先构建并解压发行 ZIP，再运行 Install.command。');
 
@@ -552,6 +544,11 @@ async function install() {
       if (running) { await stop({ keepAutostart: true }); previousService = running; }
     }
     await fs.cp(root, stage, { recursive: true, errorOnExist: true, force: false });
+    // Opening Install.command is the user's approval of this package. A browser download marks every
+    // extracted file as quarantined, and Gatekeeper kills the unsigned native helper on its first run
+    // (exit 137), which breaks every native feature. Whether a copy keeps that mark depends on the
+    // Node copy API, so the installed copy is released explicitly (-s: never follow a symlink out).
+    run('/usr/bin/xattr', ['-d', '-r', '-s', 'com.apple.quarantine', stage]);
     await certificate();
     if (existingRecord && await exists(application)) {
       previousApp = `${application}.previous-${stamp()}`;
@@ -711,10 +708,11 @@ async function build() {
     await prunePackages(path.join(payload, 'mac/node_modules'));
     await fs.mkdir(path.join(payload, 'mac/bin'));
     console.log('正在编译随包分发的原生辅助程序。');
-    run('/usr/bin/xcrun', ['swiftc', '-O', '-swift-version', '5', '-target', 'arm64-apple-macos14.0', '-debug-prefix-map', `${root}=/SlideSCI`, path.join(payload, 'mac/native/SlideSCI.swift'), '-o', path.join(payload, 'mac/bin/slidesci-native'), '-framework', 'AppKit', '-framework', 'Security', '-framework', 'PDFKit', '-framework', 'CoreImage', '-framework', 'ApplicationServices', '-framework', 'AVFoundation', '-framework', 'UniformTypeIdentifiers']);
+    run('/usr/bin/xcrun', ['swiftc', '-O', '-swift-version', '5', '-target', 'arm64-apple-macos14.0', '-debug-prefix-map', `${root}=/SlideSCI`, path.join(payload, 'mac/native/SlideSCI.swift'), '-o', path.join(payload, 'mac/bin/slidesci-native'), '-framework', 'AppKit', '-framework', 'PDFKit', '-framework', 'CoreImage', '-framework', 'ApplicationServices', '-framework', 'AVFoundation', '-framework', 'UniformTypeIdentifiers']);
     await fs.chmod(path.join(payload, 'mac/bin/slidesci-native'), 0o755);
     for (const [name, command] of Object.entries({ Install: 'install', Start: 'start', Stop: 'stop', Uninstall: 'uninstall', RenewCertificate: 'renew-certificate' })) {
-      const text = '#!/bin/bash\nset -euo pipefail\nif [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then echo "此安装包仅适用于 Apple Silicon Mac。"; exit 1; fi\nTASK_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexec "$TASK_ROOT/runtime/bin/node" "$TASK_ROOT/mac/scripts/distribution.mjs" ' + command + ' "$@"\n';
+      // The version check runs before the bundled Node, which itself cannot start before macOS 13.5.
+      const text = '#!/bin/bash\nset -euo pipefail\nif [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then echo "此安装包仅适用于 Apple Silicon Mac。"; exit 1; fi\nif (( $(sw_vers -productVersion | cut -d. -f1) < 14 )); then echo "此安装包需要 macOS 14 或更高版本。"; exit 1; fi\nTASK_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexec "$TASK_ROOT/runtime/bin/node" "$TASK_ROOT/mac/scripts/distribution.mjs" ' + command + ' "$@"\n';
       await atomic(path.join(payload, `${name}.command`), text, 0o755);
     }
     for (const file of await files(payload)) {

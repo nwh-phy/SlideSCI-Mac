@@ -41,6 +41,9 @@ export async function createFileServices(env) {
   await fs.mkdir(workDir, { recursive: true, mode: 0o700 });
   const roots = [await fs.realpath(storageDir), await fs.realpath(workDir)];
   const grantedFiles = new Set(), grantedFolders = new Set();
+  // The home folder may sit behind a symlink; host caches are matched in both spellings without
+  // resolving anything inside another app's container.
+  const home = os.homedir(), realHome = await fs.realpath(home).catch(() => home);
   async function hostDirectory(host) {
     if (!Object.hasOwn(hostDirs, host)) return workDir;
     await fs.mkdir(hostDirs[host], { recursive: true, mode: 0o700 });
@@ -48,34 +51,32 @@ export async function createFileServices(env) {
     if (!roots.includes(resolved)) roots.push(resolved);
     return resolved;
   }
-  // Register only existing host-owned caches, never entire application containers.
-  await hostRoots();
   async function allowFile(value) {
     const resolved = await fs.realpath(filePath(typeof value === 'string' ? value : value.path));
     if (!(await fs.stat(resolved)).isFile()) throw new Error('选择的项目不是文件。');
     grantedFiles.add(resolved);
     return { path: resolved, name: path.basename(resolved), mime: mimeByExtension[path.extname(resolved).toLowerCase()] || 'application/octet-stream' };
   }
-  // A host container created after the service started is registered on first use. macOS may
-  // refuse access to another app's container until the user allows it; that must not stop the
-  // service, and the host operation that needs the cache reports the denial itself.
-  async function hostRoots() {
+  // A host cache is registered when a file inside it is first requested, never at startup: touching
+  // another app's container raises macOS's "access data from other apps" prompt, which must not
+  // appear when the login item starts. Only the container that holds the file is touched; a denial
+  // is reported by the host operation that needs the cache.
+  async function hostRoot(target) {
     for (const host of Object.keys(hostDirs)) {
-      const container = path.dirname(path.dirname(hostDirs[host]));
-      try {
-        if (await fs.stat(container).then(item => item.isDirectory(), () => false)) await hostDirectory(host);
-      } catch (error) {
-        if (!['EPERM', 'EACCES'].includes(error.code)) throw error;
-        console.error(`SlideSCI 暂时无法访问 ${host} 的数据目录：${error.message}`);
-      }
+      const real = path.join(realHome, path.relative(home, hostDirs[host]));
+      if (!contained(target, hostDirs[host]) && !contained(target, real)) continue;
+      try { await hostDirectory(host); }
+      catch { /* the caller then reports the file as not granted */ }
     }
   }
   async function requireFile(value) {
-    const resolved = await fs.realpath(filePath(value));
+    const spelled = path.resolve(filePath(value));
+    const resolved = await fs.realpath(spelled);
     const allowed = () => grantedFiles.has(resolved) || roots.some(root => contained(resolved, root))
       || [...grantedFolders].some(root => contained(resolved, root));
     if (allowed()) return resolved;
-    await hostRoots().catch(() => {});
+    await hostRoot(spelled);
+    if (resolved !== spelled) await hostRoot(resolved);
     if (allowed()) return resolved;
     throw new Error('请先通过文件选择器选择该文件。');
   }

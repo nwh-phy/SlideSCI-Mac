@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import Security
 import PDFKit
 import CoreImage
 import ImageIO
@@ -116,12 +115,6 @@ do {
         else if mime.hasPrefix("text/") { item.setData(data, forType: mime == "text/html" ? .html : .string) }
         else { item.setData(data, forType: NSPasteboard.PasteboardType(UTType(mimeType: mime)?.identifier ?? mime)) }
         board.clearContents(); board.writeObjects([item]); json(["changeCount": board.changeCount])
-    case "keychainGet", "keychainSet", "keychainDelete":
-        let account = try required(input, "account"), service = input["service"] as? String ?? "SlideSCI.AI"
-        var query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
-        if action == "keychainGet" { query[kSecReturnData as String] = true; query[kSecMatchLimit as String] = kSecMatchLimitOne; var result: CFTypeRef?; let status = SecItemCopyMatching(query as CFDictionary, &result); if status == errSecItemNotFound { json(NSNull()) } else if status == errSecSuccess, let data = result as? Data, let secret = String(data: data, encoding: .utf8) { json(secret) } else { fail("Keychain read failed (\(status))") } }
-        else if action == "keychainDelete" { let status = SecItemDelete(query as CFDictionary); guard status == errSecSuccess || status == errSecItemNotFound else { fail("Keychain delete failed (\(status))") }; json([:]) }
-        else { guard let secret = input["secret"] as? String else { fail("Missing secret") }; let changes = [kSecValueData as String: Data(secret.utf8)]; var status = SecItemUpdate(query as CFDictionary, changes as CFDictionary); if status == errSecItemNotFound { query.merge(changes) { _, new in new }; query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly; status = SecItemAdd(query as CFDictionary, nil) }; guard status == errSecSuccess else { fail("Keychain write failed (\(status))") }; json([:]) }
     case "mediaInfo":
         let url = URL(fileURLWithPath: try required(input, "path")), asset = AVURLAsset(url: url)
         var width = 0.0, height = 0.0, rotation = 0.0
