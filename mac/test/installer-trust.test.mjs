@@ -568,3 +568,33 @@ test('a browser-downloaded package installs without the quarantine mark, so Gate
     assert.ok(marked(path.join(pkg, 'mac/bin/slidesci-native')), 'the downloaded folder itself is left as it was');
   } finally { await rm(home, { recursive: true, force: true }); }
 });
+
+test('a host container macOS refuses to open stops install and upgrade before any change, instead of counting as missing', async () => {
+  const fixture = await upgradeEnvironment('slidesci-denied-container-');
+  const data = path.join(fixture.home, 'Library/Containers/com.microsoft.Powerpoint/Data');
+  const jsaddons = path.join(fixture.home, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/.kingsoft/wps/jsaddons');
+  const publish = path.join(jsaddons, 'publish.xml');
+  const installed = () => readFile(path.join(fixture.home, 'Library/Application Support/SlideSCI-Mac/BUILD-INFO.json')).then(() => true, () => false);
+  try {
+    await mkdir(jsaddons, { recursive: true });
+    await writeFile(publish, '<jsplugins/>');
+    // What a "Don't Allow" on macOS's app-data prompt looks like to the installer.
+    await chmod(data, 0);
+    let output = failureOutput(() => fixture.runPkg(fixture.v1Pkg, 'install', ['--trust-certificate', 'no']));
+    assert.match(output, /macOS 拒绝“终端”访问 PowerPoint 的数据，安装器无法读写其中的 SlideSCI 加载项注册/);
+    assert.doesNotMatch(output, /尚未找到 PowerPoint 或 WPS 的容器/);
+    assert.equal(await readFile(publish, 'utf8'), '<jsplugins/>', 'WPS is not registered on its own');
+    assert.equal(await installed(), false, 'nothing is installed');
+
+    await chmod(data, 0o700);
+    fixture.runPkg(fixture.v1Pkg, 'install', ['--trust-certificate', 'no']);
+    const before = await fixture.installation();
+    assert.deepEqual(before.registrations.map(item => item.host).sort(), ['powerpoint', 'wps']);
+    await chmod(data, 0);
+    output = failureOutput(() => fixture.runPkg(fixture.v2Pkg, 'install', ['--upgrade', 'yes', '--trust-certificate', 'no']));
+    assert.match(output, /macOS 拒绝“终端”访问 PowerPoint 的数据/);
+    assert.deepEqual(await fixture.installation(), before, 'the record keeps both registrations');
+    assert.equal(await fixture.buildVersion(), '0.1.2');
+    assert.equal((await fixture.launchCalls()).filter(line => line.startsWith('bootout')).length, 0, 'the running service is left alone');
+  } finally { await chmod(data, 0o700).catch(() => {}); await rm(fixture.home, { recursive: true, force: true }); }
+});

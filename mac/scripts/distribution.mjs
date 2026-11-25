@@ -97,6 +97,12 @@ function bootoutLaunchAgent() {
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 const hash = data => createHash('sha256').update(data).digest('hex');
 const exists = async file => fs.access(file).then(() => true, () => false);
+// For paths inside the hosts' containers: macOS refuses another app's data with EPERM, and reading
+// that as "missing" would install for one host only or drop a registration from the record.
+const present = async file => fs.access(file).then(() => true, error => {
+  if (['ENOENT', 'ENOTDIR'].includes(error.code)) return false;
+  throw error;
+});
 const json = async file => JSON.parse(await fs.readFile(file, 'utf8'));
 function run(file, args, cwd = root) { return execFileSync(file, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 8 * 1024 * 1024 }); }
 async function atomic(file, data, mode = 0o600) {
@@ -170,7 +176,7 @@ async function stop({ keepAutostart = false } = {}) {
 }
 // The installer writes host registrations inside each app's container, and macOS asks before Terminal
 // touches another app's data; a refusal is named plainly instead of as a bare EPERM.
-const accessHelp = names => `macOS 拒绝“终端”访问 ${names.join('、')} 的数据，SlideSCI 的插入、格式与导出等功能将无法使用。出现“访问其他 App 的数据”提示时请选择允许；如果之前拒绝过，请在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”中打开“终端”，然后重新运行此命令。`;
+const accessHelp = names => `macOS 拒绝“终端”访问 ${names.join('、')} 的数据，安装器无法读写其中的 SlideSCI 加载项注册。出现“访问其他 App 的数据”提示时请选择允许；如果之前拒绝过，请在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”中打开“终端”，然后重新运行此命令。`;
 function permissionMessage(error) {
   if (!['EPERM', 'EACCES'].includes(error?.code)) return error?.message;
   const where = String(error.path || error.message);
@@ -418,16 +424,16 @@ async function untrustCertificate(file) {
 async function registrations() {
   const result = [];
   const power = path.join(profile, 'Library/Containers/com.microsoft.Powerpoint/Data/Documents');
-  if (await exists(power)) {
+  if (await present(power)) {
     const target = path.join(power, 'wef/SlideSCI-Mac.xml');
-    const prior = await exists(target) ? await fs.readFile(target, 'utf8') : null;
+    const prior = await present(target) ? await fs.readFile(target, 'utf8') : null;
     const value = await fs.readFile(path.join(root, 'mac/office/manifest.xml'), 'utf8');
     result.push({ host: 'powerpoint', target, prior, before: prior, value, installedHash: hash(value) });
   }
   const wps = path.join(profile, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/.kingsoft/wps/jsaddons');
-  if (await exists(wps)) {
+  if (await present(wps)) {
     const target = path.join(wps, 'publish.xml');
-    const before = await exists(target) ? await fs.readFile(target, 'utf8') : null;
+    const before = await present(target) ? await fs.readFile(target, 'utf8') : null;
     const document = parse(before ?? '<jsplugins/>'), parent = document.documentElement;
     if (parent.tagName !== 'jsplugins') throw new Error('WPS 注册根节点未知，未修改。');
     const entries = Array.from(parent.childNodes).filter(node => node.nodeType === 1 && node.getAttribute('name') === 'slidesci-mac-dev');
@@ -441,7 +447,7 @@ async function registrations() {
   return result;
 }
 async function restoreRegistration(item, checkOnly = false) {
-  if (!await exists(item.target)) return;
+  if (!await present(item.target)) return;
   const current = await fs.readFile(item.target, 'utf8');
   if (item.host === 'powerpoint') {
     if (hash(current) !== item.installedHash) throw new Error('PowerPoint 注册已被另行修改，保留当前文件及备份。');
@@ -556,7 +562,7 @@ async function install() {
     }
     await fs.rename(stage, application); moved = true;
     for (const { before, value, ...item } of planned) {
-      const current = await exists(item.target) ? await fs.readFile(item.target, 'utf8') : null;
+      const current = await present(item.target) ? await fs.readFile(item.target, 'utf8') : null;
       if (current !== before) throw new Error('安装期间加载项注册已变化，停止覆盖并恢复本次写入。');
       if (before !== null) await atomic(path.join(state, `backups/${stamp()}-${item.host}.xml`), before);
       await atomic(item.target, value); installed.push(item);
