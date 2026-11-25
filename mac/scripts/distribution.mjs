@@ -724,7 +724,11 @@ async function build() {
     }
     for (const file of await files(payload)) {
       const data = await fs.readFile(path.join(payload, file));
-      if (data.includes(Buffer.from(os.homedir() + path.sep))) throw new Error(`分发文件包含个人路径：${file}`);
+      // Prebuilt libraries in node_modules arrive byte-for-byte from the registry (npm ci checks them
+      // against the lockfile hashes), so they cannot hold this builder's paths; they do carry their
+      // own build machine's, and sharp's libvips was built under /Users/runner, the CI runner's home.
+      const registryBinary = file.startsWith(path.join('mac', 'node_modules') + path.sep) && /\.(?:dylib|node|so)$/.test(file);
+      if (!registryBinary && data.includes(Buffer.from(os.homedir() + path.sep))) throw new Error(`分发文件包含个人路径：${file}`);
       if (/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----\r?\n[A-Za-z0-9+/]{32}/.test(data.toString('latin1'))) throw new Error(`分发文件包含私钥：${file}`);
     }
     const zip = path.join(output, name + '.zip');
