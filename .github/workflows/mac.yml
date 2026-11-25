@@ -19,13 +19,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    # Apple Silicon, like every supported install.
+  mac:
+    # Apple Silicon, like every supported install. Everything runs in one job because macOS arm64
+    # runners are scarce: each job waits for its own runner, and GitHub has failed runs whose job
+    # was never acquired by one.
     runs-on: macos-15
-    timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: mac
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -35,22 +36,9 @@ jobs:
           cache: npm
           cache-dependency-path: mac/package-lock.json
       - run: npm ci
-      - run: npm test
-
-  package:
-    needs: test
-    runs-on: macos-15
-    timeout-minutes: 30
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: mac/package-lock.json
-      - run: npm ci
+        working-directory: mac
+      - name: Unit tests
+        run: npm test
         working-directory: mac
       - name: Build the installer ZIP
         run: node mac/scripts/distribution.mjs build --output "$RUNNER_TEMP/dist"
