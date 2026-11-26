@@ -14,6 +14,24 @@ const watches = new Map();
 let compiling;
 let officeQueue = Promise.resolve();
 let clipboardOperationDepth = 0;
+let ignoredGeneralChangeCount = -1;
+
+// restoreClipboard/writeClipboard run in a separate helper process and bump NSPasteboard.general's
+// changeCount. The watcher polls every 200ms, so it often sees that write after clipboardOperationDepth
+// drops back to 0. Suppress general-pasteboard events up through the last internal write count.
+function noteClipboardWrite(result) {
+  if (Number.isInteger(result?.changeCount) && result.changeCount > ignoredGeneralChangeCount) {
+    ignoredGeneralChangeCount = result.changeCount;
+  }
+  return result;
+}
+export function shouldSuppressWatchEvent(event, { depth = clipboardOperationDepth, ignoredCount = ignoredGeneralChangeCount } = {}) {
+  if (!event || event.type === 'nativeError') return false;
+  if (depth > 0) return true;
+  if (event.type !== 'mediaSource' && event.type !== 'clipboardImage') return false;
+  const general = event.reason === 'clipboard' || event.pasteboard === 'Apple CFPasteboard general';
+  return general && Number.isInteger(event.changeCount) && event.changeCount <= ignoredCount;
+}
 
 function processCall(executable, args, input, { timeout = 120000, maxBytes = 256 * 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
@@ -166,7 +184,7 @@ function openFile(filename) {
 function waitForPresentation(expression) {
   return `set presentationWait to 0\nrepeat while (name of active presentation) is not (${expression}) and presentationWait < 200\ndelay 0.05\nset presentationWait to presentationWait + 1\nend repeat\nif (name of active presentation) is not (${expression}) then error "PowerPoint did not return to the target presentation." number 1`;
 }
-async function preservingClipboard(operation) { clipboardOperationDepth++; let items; try { items = await helper('snapshotClipboard'); return await operation(); } finally { try { if (items) await helper('restoreClipboard', { items }); } finally { clipboardOperationDepth--; } } }
+async function preservingClipboard(operation) { clipboardOperationDepth++; let items; try { items = await helper('snapshotClipboard'); return await operation(); } finally { try { if (items) noteClipboardWrite(await helper('restoreClipboard', { items })); } finally { clipboardOperationDepth--; } } }
 function rgb(value) { if (!/^#[0-9a-f]{6}$/i.test(value)) throw new Error('Colors must be #RRGGBB.'); return '{' + [1, 3, 5].map((offset) => parseInt(value.slice(offset, offset + 2), 16)).join(', ') + '}'; }
 function enumValue(mapping, value, label) { if (!(value in mapping)) throw new Error(`Unknown ${label}: ${value}`); return mapping[value]; }
 const strike = { true: 'single strike', false: 'no strike' };
@@ -358,7 +376,7 @@ async function mediaBox(command, filename) {
 async function insertImageCommand(command, slide, env, expected) {
   const filename = await nativeAsset(command, env);
   return preservingClipboard(async () => {
-    await helper('writeFileClipboard', { path: filename });
+    noteClipboardWrite(await helper('writeFileClipboard', { path: filename }));
     await appleScript(office(`set index of targetWindow to 1\nset originalSlideNumber to slide index of slide of view of targetWindow\ngo to slide (view of targetWindow) number (slide index of ${slide})\nset beforeCount to count of shapes of ${slide}\npaste object (view of targetWindow)\nif (count of shapes of ${slide}) <= beforeCount then error "PowerPoint did not paste the image from the clipboard." number 1\nset targetShape to last shape of ${slide}\nif (shape type of targetShape) is not shape type picture then error ("PowerPoint pasted the file as " & ((shape type of targetShape) as text) & " instead of an embedded picture.") number 1\n${formattingScript(command)}\ngo to slide (view of targetWindow) number originalSlideNumber`, expected));
     env.events?.emit?.('changed', { host: 'powerpoint' });
   });
@@ -482,7 +500,7 @@ async function mediaInfo(input, env) {
 async function renderPicturePDF(filename) {
   const pdf = await temporaryPath('pdf');
   const geometry = await preservingClipboard(async () => {
-    await helper('writeFileClipboard', { path: filename });
+    noteClipboardWrite(await helper('writeFileClipboard', { path: filename }));
     return appleScript(`tell application "Microsoft PowerPoint"\nset previousWindow to missing value\nset previousSlideNumber to 0\nset previousName to ""\ntry\nset previousWindow to active window\nset previousName to name of active presentation\nset previousSlideNumber to slide index of slide of view of previousWindow\non error\nset previousWindow to missing value\nend try\nset renderPresentation to missing value\nset renderWidth to 0\nset renderHeight to 0\ntry\nset renderPresentation to make new presentation\nrepeat while (count of slides of renderPresentation) > 0\ndelete slide 1 of renderPresentation\nend repeat\nmake new slide at end of renderPresentation with properties {layout:slide layout blank}\nset renderSlide to slide 1 of renderPresentation\nrepeat while (count of shapes of renderSlide) > 0\ndelete shape 1 of renderSlide\nend repeat\nset renderWindow to document window 1 of renderPresentation\nset renderView to view of renderWindow\nset index of renderWindow to 1\ngo to slide renderView number 1\npaste object renderView\nif (count of shapes of renderSlide) is 0 then error "PowerPoint did not paste the picture." number 1\nset renderPicture to last shape of renderSlide\nif (shape type of renderPicture) is not shape type picture then error ("PowerPoint pasted the file as " & ((shape type of renderPicture) as text) & " instead of a picture.") number 1\nset renderWidth to width of renderPicture\nset renderHeight to height of renderPicture\nset lock aspect ratio of renderPicture to false\nset renderFactor to 1\nif renderWidth > 684 then set renderFactor to 684 / renderWidth\nif renderHeight > 378 and (378 / renderHeight) < renderFactor then set renderFactor to 378 / renderHeight\nset renderWidth to renderWidth * renderFactor\nset renderHeight to renderHeight * renderFactor\nset left position of renderPicture to 0\nset top of renderPicture to 0\nset width of renderPicture to renderWidth\nset height of renderPicture to renderHeight\nsave renderPresentation in (POSIX file ${asText(pdf)}) as save as PDF\nclose renderPresentation saving no\nset renderPresentation to missing value\nif previousWindow is not missing value then\nset index of previousWindow to 1\ngo to slide (view of previousWindow) number previousSlideNumber\nend if\non error errorText number errorNumber\nif renderPresentation is not missing value then close renderPresentation saving no\nerror errorText number errorNumber\nend try\nend tell\nreturn ((renderWidth as text) & "," & (renderHeight as text))`);
   });
   const [width, height] = String(geometry).split(',').map(Number);
@@ -619,7 +637,7 @@ async function finishExport(input, env) {
     const saved = env.files?.write ? await env.files.write({ folder: input.folder, name: file.name, data: file.data, mime: file.mime }) : await writeIssued({ folder: input.folder, name: file.name, data: file.data });
     file.path = typeof saved === 'string' ? saved : saved.path;
   }
-  if (input.copyToClipboard && result.length) await helper('writeClipboard', result[0]);
+  if (input.copyToClipboard && result.length) noteClipboardWrite(await helper('writeClipboard', result[0]));
   return result;
 }
 async function nativeOSAction(input, env) {
@@ -646,7 +664,7 @@ async function nativeOSAction(input, env) {
       return {};
     }
     case 'snapshotClipboard': clipboardOperationDepth++; try { return { items: await helper('snapshotClipboard') }; } catch (error) { clipboardOperationDepth--; throw error; }
-    case 'restoreClipboard': try { return await helper('restoreClipboard', { items: input.items }); } finally { clipboardOperationDepth = Math.max(0, clipboardOperationDepth - 1); }
+    case 'restoreClipboard': try { return noteClipboardWrite(await helper('restoreClipboard', { items: input.items })); } finally { clipboardOperationDepth = Math.max(0, clipboardOperationDepth - 1); }
     case 'readFile': return readIssued(input, env);
     case 'mediaInfo': return mediaInfo(input, env);
     case 'rasterPDF': return helper('rasterPDF', { ...input, path: await authorizeFile(input.path, env) });
@@ -670,7 +688,7 @@ async function watchStart(input = {}, env = {}) {
   child.stdin.end(JSON.stringify({ ...input, action: 'watch' }));
   child.stderr.on('data', (chunk) => { if (errors.length < 4096) errors += chunk.toString('utf8'); });
   child.on('error', (error) => settleReady(error));
-  child.stdout.on('data', (chunk) => { buffer += chunk.toString('utf8'); let newline; while ((newline = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); try { const event = JSON.parse(line); if (event.type === 'ready') settleReady(null, { id, ...event }); else if (!clipboardOperationDepth) { for (const file of event.files || []) issuedFiles.add(path.resolve(file.path)); env.events?.emit?.(event.type === 'nativeError' ? 'nativeError' : event.type === 'hostChanged' ? 'changed' : 'mediaSource', event); } } catch (error) { env.events?.emit?.('nativeError', { message: error.message }); } } });
+  child.stdout.on('data', (chunk) => { buffer += chunk.toString('utf8'); let newline; while ((newline = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); try { const event = JSON.parse(line); if (event.type === 'ready') settleReady(null, { id, ...event }); else if (!shouldSuppressWatchEvent(event)) { for (const file of event.files || []) issuedFiles.add(path.resolve(file.path)); env.events?.emit?.(event.type === 'nativeError' ? 'nativeError' : event.type === 'hostChanged' ? 'changed' : 'mediaSource', event); } } catch (error) { env.events?.emit?.('nativeError', { message: error.message }); } } });
   child.on('close', (code) => { watches.delete(id); if (!readySettled) settleReady(new Error(errors || 'Native watcher exited before start.')); else if (code && !child.slideSciStopping) env.events?.emit?.('nativeError', { message: errors || 'Native watcher exited.' }); });
   watches.set(id, child); return ready;
 }
@@ -682,7 +700,7 @@ export const nativeHandlers = {
   reveal: async (input) => { if (typeof input.path !== 'string' || !path.isAbsolute(input.path) || /[\x00-\x1f]/.test(input.path)) throw new Error('没有可显示的本机文件位置。'); const filename = await realpath(input.path).catch(() => { throw new Error('原始文件已不存在或已移动：' + input.path); }); return helper('reveal', { path: filename }); },
   fonts: async () => helper('fonts'),
   readClipboardFiles: async () => { const result = await helper('readClipboardFiles'); for (const file of result) issuedFiles.add(await realpath(file.path)); return result; },
-  writeClipboard: async (input) => helper('writeClipboard', input),
+  writeClipboard: async (input) => noteClipboardWrite(await helper('writeClipboard', input)),
   keychainGet: async ({ account }) => helper('keychainGet', { account, service: 'SlideSCI.AI' }),
   keychainSet: async ({ account, secret }) => { if (typeof secret !== 'string') throw new Error('A keychain secret string is required.'); return helper('keychainSet', { account, secret, service: 'SlideSCI.AI' }); },
   keychainDelete: async ({ account }) => helper('keychainDelete', { account, service: 'SlideSCI.AI' }),

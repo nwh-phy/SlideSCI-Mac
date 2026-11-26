@@ -11,7 +11,6 @@ import { EventEmitter } from 'node:events';
 import { contentHandlers } from './lib/content.mjs';
 import { imageHandlers } from './lib/images.mjs';
 import { libraryHandlers } from './lib/library.mjs';
-import { aiHandlers } from './lib/ai.mjs';
 import { nativeHandlers } from './lib/native.mjs';
 import { pptx } from './lib/pptx.mjs';
 import { createFileServices } from './lib/storage.mjs';
@@ -33,22 +32,9 @@ events.setMaxListeners(100);
 const env = { events, pptx, version };
 env.native = Object.fromEntries(Object.entries(nativeHandlers).map(([name, fn]) => [name, input => fn(input || {}, env)]));
 Object.assign(env, await createFileServices(env));
-// macOS asks before one app's process touches another app's data. Probing at start makes the
-// prompt appear while the user is at Start.command, and a refusal reaches the pane at once
-// instead of failing an insert or export minutes later.
+// Stay completely passive at startup so a login LaunchAgent never triggers macOS app-data or
+// automation prompts until the user invokes an advanced native action.
 const accessWarnings = [];
-for (const [host, directory] of Object.entries(env.hostDirs || {})) {
-  const container = path.dirname(path.dirname(directory));
-  if (!await stat(container).then(item => item.isDirectory(), () => false)) continue;
-  const probe = path.join(directory, `.slidesci-access-${process.pid}`);
-  try { await mkdir(directory, { recursive: true, mode: 0o700 }); await writeFile(probe, ''); await rm(probe, { force: true }); }
-  catch (error) {
-    if (!['EPERM', 'EACCES'].includes(error.code)) continue;
-    const name = host === 'wps' ? 'WPS' : 'PowerPoint';
-    accessWarnings.push(`macOS 拒绝 SlideSCI 服务访问 ${name} 的数据，插入图片、公式、格式与导出等功能会失败。出现“访问其他 App 的数据”提示时请选择允许；如果之前拒绝过，请在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”中打开运行 SlideSCI 的终端，然后重新运行 Start.command。`);
-  }
-}
-for (const warning of accessWarnings) console.error(warning);
 const diagnostics = [];
 function diagnose(message) {
   diagnostics.push({ at: new Date().toISOString(), message: String(message || '服务错误').slice(0, 4000) });
@@ -137,7 +123,7 @@ const fileHandlers = {
   }
 };
 const handlers = {
-  content: contentHandlers, images: imageHandlers, library: libraryHandlers, ai: aiHandlers,
+  content: contentHandlers, images: imageHandlers, library: libraryHandlers,
   native: nativePublic, files: fileHandlers,
   pptx: {
     parse: input => pptx.parsePresentation(input.pptx, input),
@@ -290,19 +276,12 @@ try {
   process.exit(1);
 }
 
-// Host caches only hold intermediate copies (exports, pasted pictures, style fragments); every
-// one of them is embedded or copied out within one operation. Media files are kept because a
-// host may link a video instead of embedding it.
+// Only sweep this process's own tmpdir workspace at startup; host container caches are never
+// touched until an advanced native action actually writes to that host container.
 const CACHE_AGE = 24 * 3600 * 1000;
-const keptMedia = /\.(?:mp4|m4v|mov|webm|avi|wmv|asf|mpe?g|mpe|mp3|wav|m4a|aac)$/i;
-async function sweepCaches() {
+async function sweepWorkDirs() {
   const cutoff = Date.now() - CACHE_AGE;
   const remove = async file => { try { if ((await lstat(file)).mtimeMs < cutoff) await rm(file, { recursive: true, force: true }); } catch { /* best effort */ } };
-  for (const directory of Object.values(env.hostDirs || {})) {
-    let entries;
-    try { entries = await readdir(directory); } catch { continue; }
-    for (const name of entries) if (!keptMedia.test(name)) await remove(path.join(directory, name));
-  }
   const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; } };
   try {
     for (const name of await readdir(os.tmpdir())) {
@@ -313,7 +292,7 @@ async function sweepCaches() {
     }
   } catch { /* best effort */ }
 }
-sweepCaches().catch(error => diagnose('清理临时文件失败：' + error.message));
+sweepWorkDirs().catch(error => diagnose('清理临时文件失败：' + error.message));
 
 let stopping = false;
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, async () => {

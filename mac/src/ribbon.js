@@ -20,7 +20,6 @@ const SECTION = Object.freeze({
   science: '科学图片',
   content: '内容与公式',
   library: '素材库',
-  ai: 'AI 助手',
   export: '导出',
   help: '设置与帮助'
 });
@@ -103,7 +102,6 @@ export const RIBBON_COMMANDS = Object.freeze({
   SlideSCICopyOriginal: target(SECTION.export, 'export.copyOriginal', true),
   SlideSCICopySelection: target(SECTION.export, 'export.copySelection', true),
 
-  SlideSCIAssistant: panel(SECTION.ai, 'ai.chat'),
   SlideSCISettings: { tab: SECTION.help }
 });
 

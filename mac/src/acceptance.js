@@ -3,9 +3,8 @@ import * as images from './features/images.js';
 import * as science from './features/science.js';
 import * as content from './features/content.js';
 import * as library from './features/library.js';
-import * as ai from './features/ai.js';
 import * as exported from './features/export.js';
-const features = [editing, images, science, content, library, ai, exported];
+const features = [editing, images, science, content, library, exported];
 import { findNative } from './wps-host.js';
 export function startAcceptance(ctx) {
   let stopped = false;

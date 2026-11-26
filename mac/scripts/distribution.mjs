@@ -19,6 +19,73 @@ const application = path.join(profile, 'Library/Application Support/SlideSCI-Mac
 const state = path.join(profile, 'Library/Application Support/SlideSCI-Mac-Installer');
 const recordFile = path.join(state, 'installation.json');
 const pidFile = path.join(state, 'service.json');
+const launchAgentLabel = 'com.slidesci.mac.service';
+const launchAgentFile = path.join(profile, 'Library/LaunchAgents', `${launchAgentLabel}.plist`);
+const launchctlTool = process.env.SLIDESCI_LAUNCHCTL || '/bin/launchctl';
+const launchctlAvailable = () => profile === path.resolve(os.homedir()) || Boolean(process.env.SLIDESCI_LAUNCHCTL);
+const launchDomain = () => `gui/${process.getuid()}`;
+const xmlEscape = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+function launchAgentPlist() {
+  const args = [
+    path.join(application, 'runtime/bin/node'),
+    path.join(application, 'mac/server.mjs'),
+    '--cert', path.join(state, 'tls/localhost.crt'),
+    '--key', path.join(state, 'tls/localhost.key')
+  ];
+  const logFile = path.join(state, 'service.log');
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    `  <key>Label</key><string>${launchAgentLabel}</string>`,
+    '  <key>ProgramArguments</key>',
+    '  <array>',
+    ...args.map(arg => `    <string>${xmlEscape(arg)}</string>`),
+    '  </array>',
+    `  <key>WorkingDirectory</key><string>${xmlEscape(application)}</string>`,
+    '  <key>RunAtLoad</key><true/>',
+    '  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>',
+    `  <key>StandardOutPath</key><string>${xmlEscape(logFile)}</string>`,
+    `  <key>StandardErrorPath</key><string>${xmlEscape(logFile)}</string>`,
+    '  <key>EnvironmentVariables</key>',
+    '  <dict>',
+    '    <key>NODE_ENV</key><string>production</string>',
+    '  </dict>',
+    '</dict>',
+    '</plist>',
+    ''
+  ].join('\n');
+}
+async function writeLaunchAgent() {
+  await atomic(launchAgentFile, launchAgentPlist(), 0o644);
+}
+function launchAgentLoaded() {
+  if (!launchctlAvailable()) return false;
+  try { execFileSync(launchctlTool, ['print', `${launchDomain()}/${launchAgentLabel}`], { stdio: 'ignore' }); return true; }
+  catch { return false; }
+}
+async function waitForListening(certificate) {
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch('http://127.0.0.1:3000/api/session', { signal: AbortSignal.timeout(1000) });
+      const session = await response.json();
+      const tlsSession = await httpsSession(certificate);
+      if (response.ok && session.acceptance === false && tlsSession.token === session.token) return session;
+    } catch { /* retry until startup deadline */ }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error('服务启动超时，请检查 service.log。');
+}
+function bootoutLaunchAgent() {
+  if (!launchctlAvailable()) return false;
+  try { execFileSync(launchctlTool, ['bootout', `${launchDomain()}/${launchAgentLabel}`], { stdio: 'ignore' }); return true; }
+  catch {
+    try { execFileSync(launchctlTool, ['bootout', launchDomain(), launchAgentFile], { stdio: 'ignore' }); return true; }
+    catch { return false; }
+  }
+}
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 const hash = data => createHash('sha256').update(data).digest('hex');
 const exists = async file => fs.access(file).then(() => true, () => false);
@@ -70,8 +137,13 @@ async function serviceRecord() {
   return null;
 }
 async function stop() {
+  const hadAgent = launchAgentLoaded();
+  if (hadAgent) bootoutLaunchAgent();
   const record = await serviceRecord();
-  if (!record) { console.log('SlideSCI 本机服务未在运行。'); return; }
+  if (!record) {
+    console.log(hadAgent ? '已停止 SlideSCI 后台自启服务。' : 'SlideSCI 本机服务未在运行。');
+    return;
+  }
   process.kill(-record.pid, 'SIGTERM');
   const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
@@ -124,7 +196,7 @@ function httpsSession(certificate) {
 }
 async function start() {
   if (!await exists(recordFile) || !await exists(path.join(application, 'BUILD-INFO.json'))) throw new Error('请先运行 Install.command。');
-  if (await serviceRecord()) { console.log('SlideSCI 本机服务已经运行。'); return; }
+  if (await serviceRecord() || launchAgentLoaded()) { console.log('SlideSCI 本机服务已经运行。'); return; }
   const { days } = await certificateStatus();
   if (days <= 0) {
     console.log('PowerPoint 使用的本机证书已过期，正在生成新证书。');
@@ -134,22 +206,30 @@ async function start() {
     console.log('可运行安装目录中的 RenewCertificate.command 提前生成新证书。');
   }
   const trusted = await trustCertificate();
-  const denied = await deniedHosts();
-  if (denied.length) console.log('警告：' + accessHelp(denied));
   const certificate = await fs.readFile(path.join(state, 'tls/localhost.crt'));
-  const reservations = [];
-  try {
-    const addresses = [...new Set((await lookup('localhost', { all: true })).map(value => value.address))];
-    if (!addresses.length || addresses.some(address => !['127.0.0.1', '::1'].includes(address))) throw new Error('localhost 必须仅解析到回环地址。');
-    reservations.push(await reserve(3000, '127.0.0.1'));
-    for (const address of addresses) reservations.push(await reserve(3443, address));
+  if (!process.env.SLIDESCI_LAUNCHCTL) {
+    const reservations = [];
+    try {
+      const addresses = [...new Set((await lookup('localhost', { all: true })).map(value => value.address))];
+      if (!addresses.length || addresses.some(address => !['127.0.0.1', '::1'].includes(address))) throw new Error('localhost 必须仅解析到回环地址。');
+      reservations.push(await reserve(3000, '127.0.0.1'));
+      for (const address of addresses) reservations.push(await reserve(3443, address));
+    }
+    catch (error) { for (const close of reservations) await close(); throw new Error(`本机端口 3000 或 3443 已被占用，未启动其他服务：${error.code || error.message}`); }
+    for (const close of reservations) await close();
   }
-  catch (error) { for (const close of reservations) await close(); throw new Error(`本机端口 3000 或 3443 已被占用，未启动其他服务：${error.code || error.message}`); }
-  for (const close of reservations) await close();
   const logFile = path.join(state, 'service.log');
   // Keep one previous log so a long-lived installation never grows the log without bound.
   const logSize = await fs.stat(logFile).then(item => item.size, () => 0);
   if (logSize > 5 * 1024 * 1024) await fs.rename(logFile, logFile + '.1');
+  await writeLaunchAgent();
+  if (launchctlAvailable()) {
+    execFileSync(launchctlTool, ['bootstrap', launchDomain(), launchAgentFile], { stdio: ['ignore', 'pipe', 'pipe'] });
+    if (!process.env.SLIDESCI_LAUNCHCTL) await waitForListening(certificate);
+    console.log('SlideSCI 后台服务已启动并设为登录自动运行：WPS http://127.0.0.1:3000；PowerPoint https://localhost:3443。');
+    if (!trusted) console.log('本机证书尚未被信任：PowerPoint 暂时无法加载 SlideSCI，WPS 可以正常使用。');
+    return;
+  }
   const log = await fs.open(logFile, 'a', 0o600);
   const child = spawn(path.join(application, 'runtime/bin/node'), [path.join(application, 'mac/server.mjs'), '--cert', path.join(state, 'tls/localhost.crt'), '--key', path.join(state, 'tls/localhost.key')], {
     cwd: application, detached: true, stdio: ['ignore', log.fd, log.fd],
@@ -173,7 +253,7 @@ async function start() {
           await atomic(pidFile, JSON.stringify({ pid: child.pid, signature, root: application }));
           console.log('SlideSCI 已启动：WPS http://127.0.0.1:3000；PowerPoint https://localhost:3443。');
           if (!trusted) console.log('本机证书尚未被信任：PowerPoint 暂时无法加载 SlideSCI，WPS 可以正常使用。');
-          console.log('电脑重启或注销后，请再次运行 Start.command。'); return;
+          return;
         }
       } catch { /* The process is checked again until the startup deadline. */ }
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -219,7 +299,7 @@ async function replaceCertificate() {
 }
 async function renewCertificate() {
   if (!await exists(recordFile)) throw new Error('请先运行 Install.command。');
-  const running = await serviceRecord();
+  const running = Boolean(await serviceRecord() || launchAgentLoaded());
   if (running) await stop();
   await replaceCertificate();
   if (running) await start();
@@ -330,7 +410,7 @@ async function install() {
   if (!await exists(path.join(root, 'BUILD-INFO.json')) || !await exists(path.join(root, 'runtime/bin/node'))) throw new Error('请先构建并解压发行 ZIP，再运行 Install.command。');
   if (await exists(recordFile)) throw new Error('已有本安装器版本，请先运行旧版本的 Uninstall.command；素材和设置会保留。');
   if (await exists(application)) throw new Error('目标目录已有未登记内容，未覆盖。');
-  if (await serviceRecord()) throw new Error('SlideSCI 服务仍在运行，请先运行 Stop.command。');
+  if (await serviceRecord() || launchAgentLoaded()) throw new Error('SlideSCI 服务仍在运行，请先运行 Stop.command。');
   const planned = await registrations();
   if (!planned.length) throw new Error('尚未找到 PowerPoint 或 WPS 的容器。请先安装并打开宿主一次。');
   await fs.mkdir(state, { recursive: true, mode: 0o700 });
@@ -348,10 +428,20 @@ async function install() {
       if (before !== null) await atomic(path.join(state, `backups/${stamp()}-${item.host}.xml`), before);
       await atomic(item.target, value); installed.push(item);
     }
-    await atomic(recordFile, JSON.stringify({ application, version: (await json(path.join(application, 'BUILD-INFO.json'))).version, registrations: installed }, null, 2));
+    await atomic(recordFile, JSON.stringify({ application, version: (await json(path.join(application, 'BUILD-INFO.json'))).version, registrations: installed, launchAgent: launchAgentFile }, null, 2));
+    await writeLaunchAgent();
     console.log('SlideSCI 已安装。注册宿主：' + installed.map(item => item.host).join('、'));
     if (installed.some(item => item.host === 'powerpoint')) await trustCertificate();
-    console.log('下一步：运行安装目录中的 Start.command，保存工作并重开宿主。');
+    if (launchctlAvailable()) {
+      try {
+        await start();
+        console.log('已配置登录静默自启，重启电脑后无需手动运行 Start.command；保存工作并重开演示软件即可使用。');
+      } catch (error) {
+        console.log('自动启动后台服务失败（稍后可手动运行 Start.command）：' + lastLine(error));
+      }
+    } else {
+      console.log('已生成登录自启配置（隔离测试目录未向系统 launchd 注册）。');
+    }
   } catch (error) {
     for (const item of installed.reverse()) await restoreRegistration(item);
     if (moved) await fs.rename(application, `${application}.failed-${stamp()}`);
@@ -364,12 +454,13 @@ async function uninstall() {
   if (record.application !== application) throw new Error('安装路径不匹配，停止卸载。');
   for (const item of record.registrations) await restoreRegistration(item, true);
   await stop();
+  if (await exists(launchAgentFile)) await fs.rm(launchAgentFile, { force: true });
   for (const item of [...record.registrations].reverse()) await restoreRegistration(item);
   if (await exists(application)) await fs.rename(application, `${application}.uninstalled-${stamp()}`);
   await fs.rename(recordFile, path.join(state, `uninstalled-${stamp()}.json`));
   await untrustCertificate(path.join(tlsDirectory(), 'localhost.crt'));
-  console.log('已移除本安装的加载项注册并恢复原有记录。程序移入相邻 .uninstalled 备份目录。');
-  console.log('素材、设置、AI 密钥和安装器备份均保留；证书文件保留在安装器状态目录，重装时会再次询问是否信任。');
+  console.log('已移除本安装的加载项注册、自启配置并恢复原有记录。程序移入相邻 .uninstalled 备份目录。');
+  console.log('素材、设置和安装器备份均保留；证书文件保留在安装器状态目录，重装时会再次询问是否信任。');
 }
 async function prunePackages(directory) {
   const excluded = new Set(['.bin', 'test', 'tests', '__tests__', 'fixtures', 'examples', 'example', 'benchmark', 'benchmarks', 'coverage']);
