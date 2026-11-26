@@ -441,7 +441,9 @@ async function registrations() {
     if (entries.length > 1) throw new Error('存在重复的 SlideSCI WPS 注册，停止安装。');
     const prior = entries[0] ? serialize(entries[0]) : null;
     const entry = document.createElement('jspluginonline');
-    for (const [name, value] of Object.entries({ name: 'slidesci-mac-dev', type: 'wpp', url: 'http://127.0.0.1:3000/wps/', debug: '', enable: 'enable_dev', install: 'null' })) entry.setAttribute(name, value);
+    // WPS adds its JS debugger button to any entry with a debug attribute, even an empty one;
+    // enable_dev is what WPS itself writes once the user trusts an add-in.
+    for (const [name, value] of Object.entries({ name: 'slidesci-mac-dev', type: 'wpp', url: 'http://127.0.0.1:3000/wps/', enable: 'enable_dev', install: 'null' })) entry.setAttribute(name, value);
     if (entries[0]) parent.replaceChild(entry, entries[0]); else parent.appendChild(entry);
     result.push({ host: 'wps', target, prior, before, value: serialize(document), installedEntry: serialize(entry) });
   }

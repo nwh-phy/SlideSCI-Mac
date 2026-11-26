@@ -50,7 +50,7 @@ else:
     entry.tag = 'jspluginonline'
     entry.attrib.clear()
     entry.attrib.update(name=name, type='wpp', url='http://127.0.0.1:3000/wps/',
-                        debug='', enable='enable_dev', install='null')
+                        enable='enable_dev', install='null')
     temporary = publish.with_name('publish.xml.slidesci-tmp')
     tree.write(temporary, encoding='utf-8', xml_declaration=True)
     temporary.replace(publish)

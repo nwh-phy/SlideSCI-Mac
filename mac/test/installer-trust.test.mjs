@@ -621,3 +621,26 @@ test('only a host app itself counts as running, not the extensions inside its bu
     assert.match(install(apps, ['--upgrade', 'yes']), /检测到 PowerPoint、WPS 正在运行/);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
+
+test('the WPS registration carries no debug attribute, which is what makes WPS add its JS debugger button', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'slidesci-wps-entry-'));
+  const pkg = path.join(home, 'pkg');
+  const jsaddons = path.join(home, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/.kingsoft/wps/jsaddons');
+  try {
+    await mkdir(jsaddons, { recursive: true });
+    // An entry left by 0.2.1 and earlier, next to another add-in the user registered in debug mode.
+    await writeFile(path.join(jsaddons, 'publish.xml'), '<jsplugins><jspluginonline name="other" type="wps" url="http://localhost:3889/" debug="" enable="enable_dev" install="null"/>'
+      + '<jspluginonline name="slidesci-mac-dev" type="wpp" url="http://127.0.0.1:3000/wps/" debug="" enable="enable_dev" install="null"/></jsplugins>');
+    await makePackageFixture(pkg, { version: '0.2.2', manifestXml: '<OfficeApp><Version>1.2.0.0</Version></OfficeApp>' });
+    execFileSync(process.execPath, [path.join(pkg, 'mac/scripts/distribution.mjs'), 'install', '--profile', home, '--trust-certificate', 'no'], {
+      env: { ...process.env, SLIDESCI_RUNNING_HOSTS: '' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+    });
+    const xml = await readFile(path.join(jsaddons, 'publish.xml'), 'utf8');
+    const ours = xml.match(/<jspluginonline[^>]*name="slidesci-mac-dev"[^>]*>/g);
+    assert.equal(ours?.length, 1);
+    assert.doesNotMatch(ours[0], /\bdebug=/);
+    // WPS itself writes enable_dev once the user trusts an add-in; it skips the trust prompt.
+    assert.match(ours[0], /\benable="enable_dev"/);
+    assert.match(xml, /<jspluginonline name="other" type="wps" url="http:\/\/localhost:3889\/" debug="" enable="enable_dev" install="null"\/>/, 'other add-ins are left as they were');
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
