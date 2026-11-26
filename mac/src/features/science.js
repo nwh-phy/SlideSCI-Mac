@@ -152,7 +152,19 @@ async function synchronizeUngroupedScale(ctx, context) {
   if (orphans.length) commands.push({ op: 'delete', ids: orphans });
   return commands.length ? ctx.host.apply(commands) : context;
 }
-function zoomPlacement(source, region, placement, occupied) {
+// A new inset that would run off the slide shrinks into the room on its side, keeping the edge
+// next to the picture; it keeps its size when it would end up no larger than the marked region.
+function fitOnSlide(bounds, rw, placement, slide) {
+  if (!slide) return bounds;
+  const room = placement === 'right' ? slide.left + slide.width - bounds.left : placement === 'left' ? bounds.left + bounds.width - slide.left
+    : placement === 'bottom' ? slide.top + slide.height - bounds.top : bounds.top + bounds.height - slide.top;
+  const factor = room / (placement === 'left' || placement === 'right' ? bounds.width : bounds.height);
+  if (factor >= 1 || bounds.width * factor <= rw) return bounds;
+  const width = bounds.width * factor, height = bounds.height * factor;
+  return { ...bounds, width, height, left: placement === 'left' ? bounds.left + bounds.width - width : bounds.left,
+    top: placement === 'top' ? bounds.top + bounds.height - height : bounds.top };
+}
+function zoomPlacement(source, region, placement, occupied, slide) {
   const gap = .5 * 72 / 2.54, rw = region.width * source.width, rh = region.height * source.height;
   const horizontal = placement === 'left' || placement === 'right', scale = horizontal ? source.height / rh : source.width / rw;
   const width = rw * scale, height = rh * scale;
@@ -165,8 +177,9 @@ function zoomPlacement(source, region, placement, occupied) {
     if (placement === 'top') bounds.top = collision.top - gap - height;
     if (placement === 'bottom') bounds.top = collision.top + collision.height + gap;
   }
-  return bounds;
+  return fitOnSlide(bounds, rw, placement, slide);
 }
+const slideBounds = context => context?.width > 0 && context?.height > 0 ? { left: 0, top: 0, width: context.width, height: context.height } : null;
 function cropFov(source, region) {
   const fov = visibleFov(source); if (!fov) return null;
   const angle = (region.rotation || 0) * Math.PI / 180, c = Math.cos(angle), s = Math.sin(angle);
@@ -200,8 +213,8 @@ async function createOrUpdateZoom(ctx, context, source, entry, occupied = [], { 
   let rendered;
   if (needsPixels) rendered = await ctx.services.request('images/crop', { ...await imageFor(ctx, source), region, displayAspect: source.width / source.height });
   const previousScale = zoom ? scaleOf(zoom) : null;
-  let bounds = zoom ? geometry(zoom) : zoomPlacement(source, region, options.placement, occupied);
-  if (zoom && entry.placement !== entry.initialPlacement && entry.initialPlacement) bounds = zoomPlacement(source, region, options.placement, occupied);
+  let bounds = zoom ? geometry(zoom) : zoomPlacement(source, region, options.placement, occupied, slideBounds(context));
+  if (zoom && entry.placement !== entry.initialPlacement && entry.initialPlacement) bounds = zoomPlacement(source, region, options.placement, occupied, slideBounds(context));
   else if (zoom && needsPixels) {
     if (options.placement === 'left' || options.placement === 'right') bounds.width = bounds.height * (rendered.width / rendered.height);
     else bounds.height = bounds.width * (rendered.height / rendered.width);
@@ -385,7 +398,7 @@ async function mountZoom(container, ctx) {
     name: control(fields, '名称', 'text', '放大图 1'), color: control(fields, '矩形与辅助线颜色', 'color', zoomDefaults.color), lineWidth: control(fields, '轮廓宽度（pt）', 'number', 1.5), dash: control(fields, '线型', 'select', 'solid', [{ value: 'solid', label: '实线' }, { value: 'dash', label: '虚线' }, { value: 'dot', label: '点线' }, { value: 'dashDot', label: '点划线' }, { value: 'dashDotDot', label: '双点划线' }]), useColor: control(fields, '放大图使用矩形颜色', 'checkbox', true), guides: control(fields, '添加辅助线', 'checkbox', true), extent: control(fields, '辅助线范围', 'select', 'across', [{ value: 'across', label: '连接原图与放大图' }, { value: 'inside', label: '仅原图内部' }]), placement: control(fields, '放大图方向', 'select', 'right', [{ value: 'right', label: '右' }, { value: 'left', label: '左' }, { value: 'top', label: '上' }, { value: 'bottom', label: '下' }]), scaleLength: control(fields, '比例尺长度（μm，0 隐藏，留空继承）', 'number', ''), scaleShowText: control(fields, '比例尺显示文字', 'checkbox', true), rotation: control(fields, '区域旋转（度）', 'number', 0), x: control(fields, '区域 X（原图比例）', 'number', .25), y: control(fields, '区域 Y（原图比例）', 'number', .25), width: control(fields, '区域宽度（原图比例）', 'number', .25), height: control(fields, '区域高度（原图比例）', 'number', .25)
   };
   for (const key of ['x', 'y', 'width', 'height']) controls[key].step = '.001'; controls.rotation.step = '1'; controls.lineWidth.min = '.01'; controls.lineWidth.step = '.1'; controls.scaleLength.min = '0';
-  let sources = [], entries = [], active = -1, image = null, previewKey = '', zoom = 1, pan = { x: 0, y: 0 }, drag = null, space = false, disposed = false, imageGeneration = 0;
+  let sources = [], entries = [], active = -1, image = null, previewKey = '', zoom = 1, pan = { x: 0, y: 0 }, drag = null, space = false, disposed = false, imageGeneration = 0, slide = null;
   const g = canvas.getContext('2d');
   function view() { if (!sources[0]) return { scale: 1, x: 0, y: 0 }; const scale = Math.min((canvas.width - 50) / sources[0].width, (canvas.height - 50) / sources[0].height) * zoom; return { scale, x: (canvas.width - sources[0].width * scale) / 2 + pan.x, y: (canvas.height - sources[0].height * scale) / 2 + pan.y }; }
   function point(event) { const b = canvas.getBoundingClientRect(), v = view(); return { x: ((event.clientX - b.left) * canvas.width / b.width - v.x) / v.scale / (sources[0]?.width || 1), y: ((event.clientY - b.top) * canvas.height / b.height - v.y) / v.scale / (sources[0]?.height || 1) }; }
@@ -414,7 +427,7 @@ async function mountZoom(container, ctx) {
     for (const entry of entries) {
       if (!(entry.region.width > 0 && entry.region.height > 0)) continue;
       const old = entry.zoomState;
-      const bounds = old && entry.placement === entry.initialPlacement ? { ...old, left: old.left - sources[0].left, top: old.top - sources[0].top, rotation: (old.rotation || 0) - (sources[0].rotation || 0) } : zoomPlacement(source, entry.region, entry.placement, occupied);
+      const bounds = old && entry.placement === entry.initialPlacement ? { ...old, left: old.left - sources[0].left, top: old.top - sources[0].top, rotation: (old.rotation || 0) - (sources[0].rotation || 0) } : zoomPlacement(source, entry.region, entry.placement, occupied, slide && { ...slide, left: slide.left - sources[0].left, top: slide.top - sources[0].top });
       occupied.push(bounds); layouts.push({ entry, bounds });
     }
     const minX = Math.min(0, ...occupied.map(b => b.left)), minY = Math.min(0, ...occupied.map(b => b.top)), maxX = Math.max(source.width, ...occupied.map(b => b.left + b.width)), maxY = Math.max(source.height, ...occupied.map(b => b.top + b.height));
@@ -480,7 +493,7 @@ async function mountZoom(container, ctx) {
   async function reload({ refreshPreview = true } = {}) {
     load.disabled = true;
     try {
-      const context = await ctx.host.context({ textSelection: false }), items = selected(context), rectangle = items.filter(s => !isImage(s)); sources = items.filter(isImage);
+      const context = await ctx.host.context({ textSelection: false }), items = selected(context), rectangle = items.filter(s => !isImage(s)); sources = items.filter(isImage); slide = slideBounds(context);
       if (!sources.length || rectangle.length > 1 || rectangle.length && sources.length !== 1 || rectangle.some(s => s.type !== 'shape' || s.shapeType && s.shapeType !== 'rectangle')) throw new Error('请选择一张或多张图片，或一张图片和一个普通矩形。');
       const saved = await ctx.services.request('images/settings', {}); entries = structuredClone(recordsOf(sources[0]));
       for (const entry of entries) { const marker = roles(context, entry.key, 'marker')[0]; if (marker) entry.region = relativeRegion(sources[0], marker); }

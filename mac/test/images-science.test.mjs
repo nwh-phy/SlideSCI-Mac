@@ -364,3 +364,58 @@ test('batched original images follow selection identities and keep each picture 
   assert.deepEqual(images.map(image => image.crop), [crop, undefined, crop]);
   assert.deepEqual(calls, [['b', 'a']]);
 });
+
+// Inserts one zoom for a picture on a 720 × 405 pt slide and returns the new inset's bounds.
+async function placeZoom(source, placement) {
+  const pixels = await sharp({ create: { width: 64, height: 48, channels: 4, background: '#808080ff' } }).png().toBuffer();
+  const state = { width: 720, height: 405, shapes: [{ id: 'source', name: 'Source', type: 'picture', rotation: 0, ...source,
+    alternativeText: '', tags: { SLIDESCI_IMAGE_UUID: 'SOURCE' }, image: { digest: 'source-pixels' } }] };
+  let nextId = 0, inset;
+  const ctx = {
+    host: {
+      async context() { return structuredClone(state); },
+      async images() { return [{ data: pixels.toString('base64'), mime: 'image/png', width: 64, height: 48 }]; },
+      async apply(commands) {
+        for (const command of commands) {
+          if (command.op === 'insertShape' || command.op === 'insertImage') {
+            const shape = { ...command, id: 'created-' + ++nextId, type: command.op === 'insertImage' ? 'picture' : 'shape' };
+            state.shapes.push(shape);
+            if (command.op === 'insertImage') inset = shape;
+          } else if (command.op === 'update') {
+            const shape = state.shapes.find(shape => shape.id === command.id);
+            Object.assign(shape, command.properties, { tags: { ...shape.tags, ...command.properties.tags } });
+          } else throw new Error('Unexpected zoom command: ' + command.op);
+        }
+        return structuredClone(state);
+      }
+    },
+    services: { async request(route, input) {
+      if (route === 'images/crop') return imageHandlers.crop(input, {});
+      if (route === 'images/settings') return {};
+      throw new Error('Unexpected zoom service: ' + route);
+    } }
+  };
+  await applyZoomEntries(ctx, [state.shapes[0]], [{ name: 'Zoom', region: { x: .25, y: .25, width: .25, height: .25, rotation: 0 },
+    placement, guides: false, color: '#ff0000', lineWidth: 1.5, dash: 'solid' }]);
+  return { left: inset.left, top: inset.top, width: inset.width, height: inset.height };
+}
+
+test('a new zoom inset that would leave the slide shrinks into the room on its side', async () => {
+  const gap = .5 * 72 / 2.54;
+  // The picture of the WPS regression deck: a full-height inset on its right would end at 888 pt.
+  const right = await placeZoom({ left: 118.11, top: 55.12, width: 377.95, height: 251.97 }, 'right');
+  assert.ok(Math.abs(right.left - (118.11 + 377.95 + gap)) < 1e-6, 'keeps its gap to the picture');
+  assert.ok(Math.abs(right.left + right.width - 720) < 1e-6, 'ends at the slide edge');
+  assert.ok(Math.abs(right.top - 55.12) < 1e-6, 'stays aligned with the picture top');
+  assert.ok(Math.abs(right.width / right.height - 377.95 / 251.97) < 1e-6, 'keeps the region aspect');
+
+  const left = await placeZoom({ left: 200, top: 100, width: 300, height: 200 }, 'left');
+  assert.ok(Math.abs(left.left) < 1e-6, 'starts at the slide edge');
+  assert.ok(Math.abs(left.left + left.width - (200 - gap)) < 1e-6, 'keeps its gap to the picture');
+  assert.ok(Math.abs(left.width / left.height - 1.5) < 1e-6);
+
+  // No room worth zooming into: the inset would end up smaller than the marked region, so it keeps its size.
+  const crowded = await placeZoom({ left: 20, top: 50, width: 680, height: 300 }, 'right');
+  assert.ok(Math.abs(crowded.height - 300) < 1e-6);
+  assert.ok(Math.abs(crowded.width - 680) < 1e-6);
+});
