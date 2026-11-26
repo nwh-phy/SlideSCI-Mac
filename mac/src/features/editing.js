@@ -370,8 +370,10 @@ definitions.push(
       textFrame: { wordWrap: false, autoSize: 'shapeToFitText' }, name: `${shape.name} 标签` }));
     const next = await apply(ctx, commands);
     const ids = newShapes(snapshot, next).map(shape => shape.id);
-    if (values.advanceIndex) values.startIndex = start + shapes.length;
-    return apply(ctx, [{ op: 'select', ids }]);
+    await apply(ctx, [{ op: 'select', ids }]);
+    // The advanced start index must reach the visible form, or the form's old value overwrites it.
+    if (values.advanceIndex) { values.startIndex = start + shapes.length; return { message: `已添加 ${ids.length} 个标签，下次从 ${values.startIndex} 开始。`, formValues: { startIndex: values.startIndex } }; }
+    return { message: `已添加 ${ids.length} 个标签。` };
   }),
   makeAction('updateLabels', '更新图片标签', labelFields, async (ctx, values) => {
     const { shapes } = await selection(ctx);
@@ -384,7 +386,7 @@ definitions.push(
       text: labelAt(values.template, start + index),
       font: { name: values.fontName.trim(), nameFarEast: values.fontName.trim(), size: fontSize, bold: Boolean(values.bold) },
     })));
-    if (values.advanceIndex) values.startIndex = start + targets.length;
+    if (values.advanceIndex) { values.startIndex = start + targets.length; return { message: `已更新 ${targets.length} 个标签，下次从 ${values.startIndex} 开始。`, formValues: { startIndex: values.startIndex } }; }
     return result;
   }),
 );

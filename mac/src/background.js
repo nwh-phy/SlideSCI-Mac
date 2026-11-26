@@ -53,6 +53,7 @@ class BackgroundTracking {
     this.injectedAdapter = hostAdapter;
     this.adapterPromise = hostAdapter ? Promise.resolve(hostAdapter) : null;
     this.leaseId = null;
+    this.leasePromise = null;
     this.stopped = false;
     this.queue = Promise.resolve();
     this.unsubscribers = [];
@@ -98,15 +99,13 @@ class BackgroundTracking {
     this.started = true;
     this.subscribeEvents();
     globalThis.addEventListener?.('pagehide', this.pagehide, { once: true });
+    // A missing service is not fatal: the event stream keeps retrying, and its hello
+    // re-acquires the watcher lease once the service is (re)started.
     try {
-      const watcher = await this.services.startWatcher({ interceptTIFF: this.interceptTIFF });
-      this.leaseId = watcher?.id || null;
-      if (!this.leaseId) throw new Error('原生媒体监听没有返回有效租约。');
+      await this.acquireLease();
     } catch (error) {
-      this.stopped = true;
-      this.unsubscribeEvents();
       this.report(error, 'background-start');
-      throw error;
+      this.status('自动粘贴监听暂未启动：' + messageOf(error) + '。本地服务恢复后会自动重试。', 'error');
     }
     if (this.shouldInitializeScience) await this.startScience();
     try {
@@ -134,6 +133,35 @@ class BackgroundTracking {
     for (const name of EVENT_NAMES) {
       this.unsubscribers.push(this.services.subscribe(name, payload => this.receive(name, payload)));
     }
+    this.unsubscribers.push(this.services.subscribe('hello', payload => this.hello(payload)));
+  }
+
+  acquireLease() {
+    if (this.leasePromise) return this.leasePromise;
+    this.leasePromise = this.services.startWatcher({ interceptTIFF: this.interceptTIFF })
+      .then(watcher => {
+        if (!watcher?.id) throw new Error('原生媒体监听没有返回有效租约。');
+        if (this.stopped) {
+          this.services.stopWatcher(watcher.id).catch(() => {});
+          return null;
+        }
+        this.leaseId = watcher.id;
+        return watcher;
+      })
+      .finally(() => { this.leasePromise = null; });
+    return this.leasePromise;
+  }
+
+  // Every (re)connected event stream reports the leases the service still holds for this pane.
+  // A restarted service or an expired grace period leaves ours out, so take a new one.
+  hello(payload) {
+    if (this.stopped) return;
+    const leases = Array.isArray(payload?.leases) ? payload.leases : [];
+    if (this.leaseId && leases.includes(this.leaseId)) return;
+    const recovering = !this.leaseId;
+    this.acquireLease()
+      .then(watcher => { if (watcher && recovering) this.status('自动粘贴监听已恢复。', 'success'); })
+      .catch(error => this.report(error, 'background-reacquire'));
   }
 
   unsubscribeEvents() {
@@ -197,13 +225,7 @@ class BackgroundTracking {
     };
     this.pending.push(candidate);
     if (this.pending.length > 4) this.pending.shift();
-    const paths = files.map(file => file.path);
-    if (paths.length) {
-      this.services.grantFiles(paths, { source: clipboardImage ? 'clipboardImage' : candidate.reason || 'clipboard' })
-        .catch(error => {
-          if (!error?.missingRoute) this.report(error, 'grant-files');
-        });
-    }
+    // The service grants watcher-reported files before broadcasting them.
     this.beginPendingObservation();
   }
 

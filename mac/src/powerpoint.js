@@ -7,6 +7,23 @@ const geometryProperties = new Set(['left', 'top', 'width', 'height', 'rotation'
 const geometryShapeLoad = 'items/id,items/name,items/left,items/top,items/width,items/height,items/rotation,items/type';
 const shapeTypes = { Group: 'group', Image: 'picture', Media: 'media', Table: 'table', TextBox: 'text' };
 const textTypes = new Set(['TextBox', 'Placeholder', 'GeometricShape', 'Callout', 'Freeform']);
+// Office returns a path or URL; a file name such as "增长 20%.pptx" is not valid URI encoding.
+// Office.js reports GeneralException while PowerPoint is briefly busy, for example right after an
+// AppleScript paste. Reads are safe to repeat; writes are never retried.
+export async function readPowerPoint(operation, attempts = 3) {
+  for (let attempt = 1; ; attempt++) {
+    try { return await PowerPoint.run(operation); }
+    catch (error) {
+      const busy = error?.code === 'GeneralException' || error?.message === 'GeneralException';
+      if (!busy || attempt >= attempts) throw error;
+      await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+    }
+  }
+}
+function documentName(url) {
+  const last = String(url || '').split('/').at(-1) || '';
+  try { return decodeURIComponent(last); } catch { return last; }
+}
 
 export async function connectPowerPoint(services) {
   const info = await ensureOfficeReady();
@@ -17,7 +34,7 @@ export async function connectPowerPoint(services) {
   if (!services?.request) throw new Error('缺少 SlideSCI 本地服务连接。');
   const request = (route, input) => services.request(route, input);
   const native = (action, input = {}) => request('native/execute', { host: 'powerpoint', action, ...input,
-    ...(boundTitle && action !== 'rasterizeImage' ? { presentationName: Office.context.document.url ? decodeURIComponent(Office.context.document.url.split('/').at(-1)) : boundTitle } : {}) });
+    ...(boundTitle && action !== 'rasterizeImage' ? { presentationName: Office.context.document.url ? documentName(Office.context.document.url) : boundTitle } : {}) });
   let queue = Promise.resolve(), timer, stopped = false, fingerprint, surface, deepPolls = 0, notifying = false, pending = 0;
   const listeners = new Set();
   let boundTitle = '';
@@ -32,7 +49,7 @@ export async function connectPowerPoint(services) {
   }
   function title() {
     const url = Office.context.document.url;
-    return url ? decodeURIComponent(url.split('/').at(-1)).replace(/\.pptx?$/i, '') : boundTitle;
+    return url ? documentName(url).replace(/\.pptx?$/i, '') : boundTitle;
   }
   function officeShape(context, shape) {
     let collection = context.presentation.slides.getItemAt(shape.ref.slideIndex).shapes;
@@ -60,7 +77,7 @@ export async function connectPowerPoint(services) {
     return { indices, slideIndex };
   }
   async function quick(options = {}) {
-    return PowerPoint.run(async context => {
+    return readPowerPoint(async context => {
       const presentation = context.presentation;
       const slides = presentation.slides;
       const selected = presentation.getSelectedSlides();
@@ -137,7 +154,7 @@ export async function connectPowerPoint(services) {
     return walk(shapes, false);
   }
   async function geometryContext(options = {}, extraIds = []) {
-    return PowerPoint.run(async context => {
+    return readPowerPoint(async context => {
       const presentation = context.presentation;
       const slides = presentation.slides;
       const selectedSlides = presentation.getSelectedSlides();
@@ -226,7 +243,7 @@ export async function connectPowerPoint(services) {
   async function snapshot(options = {}) {
     const selection = await quick();
     const all = options.scope === 'presentation';
-    const data = await PowerPoint.run(async context => {
+    const data = await readPowerPoint(async context => {
       const slides = context.presentation.slides;
       const exported = slides.exportAsBase64Presentation(all ? selection.slides.map(slide => slide.id) : [selection.slideId]);
       await context.sync();
@@ -243,18 +260,22 @@ export async function connectPowerPoint(services) {
     if (!active) throw new Error('当前幻灯片已改变，请重试。');
     const model = { ...selection, width: parsed.width, height: parsed.height, shapes: active.shapes,
       slides: all ? parsed.slides : selection.slides };
-    model.textSelection = await native('textSelection', { context: { selectionIds: selection.selectionIds } });
-    if (model.textSelection && !model.textSelection.shapeId) await PowerPoint.run(async context => {
-      const shape = context.presentation.getSelectedTextRange().getParentTextFrame().getParentShape();
-      shape.load('id'); await context.sync();
-      model.textSelection.shapeId = shape.id;
-    });
+    // The change watch never needs the text cursor. Reading it runs AppleScript against the active
+    // window, which fails for every other open deck and would spawn a process every few seconds.
+    if (!options.watch) {
+      model.textSelection = await native('textSelection', { context: { selectionIds: selection.selectionIds } });
+      if (model.textSelection && !model.textSelection.shapeId) await PowerPoint.run(async context => {
+        const shape = context.presentation.getSelectedTextRange().getParentTextFrame().getParentShape();
+        shape.load('id'); await context.sync();
+        model.textSelection.shapeId = shape.id;
+      });
+    }
     if (options.images) {
       const images = await request('pptx/images', { pptx: data, slideIndex: packageSlideIndex });
       const byId = new Map(images.map(image => [image.id, image]));
       for (const shape of flatten(model.shapes)) if (byId.has(shape.packageId || shape.id)) shape.image = { ...shape.image, ...byId.get(shape.packageId || shape.id) };
     }
-    if (!all && !options.watch) fingerprint = JSON.stringify(model);
+    if (!all && !options.watch) fingerprint = contentFingerprint(model);
     return { context: model, pptx: data, packageSlideIndex };
   }
   function find(model, id, slideIndex = model.slideIndex) {
@@ -390,9 +411,14 @@ export async function connectPowerPoint(services) {
       await PowerPoint.run(async context => {
         if (command.op === 'delete') {
           const selected = new Set(ids.map(String));
+          // Members of any selected ancestor group go with it; nested groups included.
+          const insideSelected = shape => {
+            for (let parent = shape.parentId; parent; parent = find(model, parent, slideIndex).parentId) if (selected.has(String(parent))) return true;
+            return false;
+          };
           for (const id of selected) {
             const shape = find(model, id, slideIndex);
-            if (!shape.parentId || !selected.has(shape.parentId)) officeShape(context, shape).delete();
+            if (!insideSelected(shape)) officeShape(context, shape).delete();
           }
         } else if (command.op === 'ungroup') officeShape(context, find(model, command.id, slideIndex)).group.ungroup();
         else {
@@ -466,20 +492,28 @@ export async function connectPowerPoint(services) {
     emit();
     return model;
   }
-  function emit() {
+  // Listeners learn whether only the selection moved: the scientific sync then skips a full
+  // slide export, which otherwise ran on every click once the watch works.
+  let emittedKind = null;
+  function emit(kind = 'content') {
+    emittedKind = emittedKind === 'content' || kind === 'content' ? 'content' : 'selection';
     if (notifying) return;
     notifying = true;
     queueMicrotask(() => {
       notifying = false;
+      const change = { kind: emittedKind };
+      emittedKind = null;
       for (const callback of listeners) {
-        try { callback(); } catch (error) { services.reportError(error, { operation: 'powerpoint-change' }); }
+        try { callback(change); } catch (error) { services.reportError(error, { operation: 'powerpoint-change' }); }
       }
     });
   }
+  // Selection and text cursor are watched by the cheap pass; the deep pass compares content only.
+  function contentFingerprint(model) { return JSON.stringify({ ...model, selectionIds: undefined, textSelection: undefined }); }
   // Cheap watch fingerprint: live IDs, geometry, type, name, z-order and text only.
   // Rich formats (fill/line/crop/image bytes) still come from the periodic pptx snapshot.
   async function surfaceFingerprint() {
-    return PowerPoint.run(async context => {
+    return readPowerPoint(async context => {
       const presentation = context.presentation;
       const slides = presentation.slides;
       const selectedSlides = presentation.getSelectedSlides();
@@ -501,29 +535,37 @@ export async function connectPowerPoint(services) {
         range.load('text');
         texts.set(shape.id, range);
       }
-      if (texts.size) await context.sync();
+      // Placeholders holding a picture, chart or table have no text frame; their load fails the
+      // whole batch, so fall back to a geometry-only fingerprint instead of losing change detection.
+      if (texts.size) {
+        try { await context.sync(); } catch { texts.clear(); }
+      }
       const round = value => Number.isFinite(value) ? Math.round(value * 100) / 100 : value;
       const rows = shapes.map(shape => {
         const native = texts.get(shape.id);
         return [shape.id, shape.type, round(shape.left), round(shape.top), round(shape.width), round(shape.height),
-          round(shape.rotation), shape.name, shape.zOrder, shape.parentId ?? '', native ? String(native.textFrame.textRange.text ?? '') : ''];
+          round(shape.rotation), shape.name, shape.zOrder, shape.parentId ?? '', native ? String(native.text ?? '') : ''];
       });
-      return JSON.stringify([presentation.id, slideIndex, slides.items.length,
-        selection.items.map(shape => String(shape.id)).join(','), rows]);
+      return { content: JSON.stringify([presentation.id, slideIndex, slides.items.length, rows]),
+        selection: selection.items.map(shape => String(shape.id)).join(',') };
     });
   }
+  // Rich formats (fill, crop, image bytes, alt text) need a slide export; check them once every
+  // few unchanged cheap passes, as the WPS watch does.
+  const DEEP_POLL_INTERVAL = 4;
   async function poll() {
     if (stopped || !listeners.size) return;
     if (pending) { timer = setTimeout(poll, 1500); return; }
     try {
       const cheap = await serial(surfaceFingerprint);
       if (surface === undefined) surface = cheap;
-      else if (cheap !== surface) { surface = cheap; deepPolls = 0; emit(); }
-      else if (++deepPolls >= 2) {
+      else if (cheap.content !== surface.content) { surface = cheap; deepPolls = 0; emit('content'); }
+      else if (cheap.selection !== surface.selection) { surface = cheap; emit('selection'); }
+      else if (++deepPolls >= DEEP_POLL_INTERVAL) {
         deepPolls = 0;
         const next = await serial(() => snapshot({ scope: 'slide', watch: true }));
-        const current = JSON.stringify(next.context);
-        if (fingerprint !== undefined && current !== fingerprint) emit();
+        const current = contentFingerprint(next.context);
+        if (fingerprint !== undefined && current !== fingerprint) emit('content');
         fingerprint = current;
       }
     } catch (error) { await services.reportError(error, { operation: 'powerpoint-watch' }); }

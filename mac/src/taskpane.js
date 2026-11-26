@@ -793,6 +793,14 @@ async function runAction(action, card, controls) {
       return;
     }
     persistAction(action, values);
+    if (result?.formValues && typeof result.formValues === 'object') {
+      for (const control of controls) {
+        if (!Object.prototype.hasOwnProperty.call(result.formValues, control.field.name) || !control.input) continue;
+        if (control.field.type === 'checkbox') control.input.checked = Boolean(result.formValues[control.field.name]);
+        else control.input.value = String(result.formValues[control.field.name]);
+      }
+      persistAction(action, { ...values, ...result.formValues });
+    }
     if (!notified) {
       const message = typeof result?.message === 'string' && result.message.trim()
         ? result.message
@@ -924,7 +932,8 @@ async function connect() {
   setConnection('connecting', state.services.version ? '正在连接演示软件…' : '正在启动本地服务…');
   try {
     if (!state.target) throw new Error('请从 PowerPoint 或 WPS 演示的 SlideSCI 选项卡打开此面板。');
-    await state.services.ready();
+    const session = await state.services.ready();
+    for (const warning of session?.warnings || []) notify(warning, 'error');
     setConnection('connecting', '正在连接演示软件…');
     state.hostUnsubscribe?.();
     state.hostUnsubscribe = null;

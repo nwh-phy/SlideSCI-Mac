@@ -73,13 +73,31 @@ const mimeTypes = {
   '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm',
   '.avi': 'video/x-msvideo', '.wmv': 'video/x-ms-wmv', '.mpg': 'video/mpeg', '.mpeg': 'video/mpeg',
 };
-function decode(data) { if (typeof data !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) throw new Error('Invalid base64 file data.'); return Buffer.from(data, 'base64'); }
+// Linear checks only: a repeated-group regex over a multi-megabyte string overflows V8's regex
+// stack (a 300 dpi slide export or a large picture is several megabytes of base64).
+function decode(data) {
+  if (typeof data !== 'string' || data.length % 4 || /[^A-Za-z0-9+/=]/.test(data) || /=[^=]|={3}/.test(data)) throw new Error('Invalid base64 file data.');
+  return Buffer.from(data, 'base64');
+}
+// APFS limits a name to 255 UTF-8 bytes; cached copies carry a 37-byte UUID prefix.
+function shortName(name, limit = 180) {
+  if (Buffer.byteLength(name) <= limit) return name;
+  const extension = path.extname(name).slice(0, 16), characters = [...name.slice(0, name.length - path.extname(name).length)];
+  while (characters.length && Buffer.byteLength(characters.join('') + extension) > limit) characters.pop();
+  return (characters.join('') || 'media') + extension;
+}
 function safeName(name) { if (typeof name !== 'string' || !name || name === '.' || name === '..' || /[\x00-\x1f/\\:]/.test(name) || path.basename(name) !== name) throw new Error('Invalid output filename.'); return name; }
+// macOS asks before one app's process writes into another app's container; a denial must read as such.
+function containerError(error, host) {
+  if (!['EPERM', 'EACCES'].includes(error?.code)) return error;
+  const name = host === 'wps' ? 'WPS' : 'PowerPoint';
+  return new Error(`macOS 拒绝访问 ${name} 的数据目录。请在“访问其他 App 的数据”提示中选择允许，或在“系统设置 → 隐私与安全性”中为运行 SlideSCI 服务的终端开启相应权限，然后重新运行 Start.command。`);
+}
 async function materialize({ data, mime = 'application/octet-stream', name, host = 'powerpoint' }) {
-  const directory = hostContainer(host); await mkdir(directory, { recursive: true, mode: 0o700 });
-  const base = name ? safeName(name) : 'media';
+  const directory = hostContainer(host); await mkdir(directory, { recursive: true, mode: 0o700 }).catch((error) => { throw containerError(error, host); });
+  const base = shortName(name ? safeName(name) : 'media');
   const filename = `${randomUUID()}-${base}${path.extname(base) ? '' : extensions[mime] || '.bin'}`;
-  const output = path.join(directory, filename); await writeFile(output, decode(data), { mode: 0o600, flag: 'wx' }); issuedFiles.add(await realpath(output)); return { path: output, name: name || path.basename(output), mime };
+  const output = path.join(directory, filename); await writeFile(output, decode(data), { mode: 0o600, flag: 'wx' }).catch((error) => { throw containerError(error, host); }); issuedFiles.add(await realpath(output)); return { path: output, name: name || path.basename(output), mime };
 }
 async function authorizeFile(filename, env) {
   if (typeof filename !== 'string' || !path.isAbsolute(filename) || /[\x00-\x1f]/.test(filename)) throw new Error('A valid absolute path is required.');
@@ -127,6 +145,10 @@ async function appleScript(body, { json = false } = {}) {
     const result = await processCall('/usr/bin/osascript', ['-'], script, { timeout: 190000 });
     return json ? JSON.parse(result) : result;
   } catch (error) {
+    const text = String(error.message || '');
+    // -1743: the user has not allowed (or refused) automation; -1712: an unanswered permission prompt or a modal dialog.
+    if (/-1743|not authori[sz]ed to send Apple events|不允许发送 Apple 事件/i.test(text)) error.message = 'macOS 尚未允许 SlideSCI 服务控制 PowerPoint。请在“系统设置 → 隐私与安全性 → 自动化”中，为运行 SlideSCI 的终端打开 Microsoft PowerPoint，然后重试。';
+    else if (/-1712|AppleEvent.*(timed out|已超时)/i.test(text)) error.message = 'PowerPoint 没有及时响应。如果屏幕上有“终端想要控制 Microsoft PowerPoint”的提示，请选择允许后重试；也请确认 PowerPoint 没有打开中的对话框。';
     if (process.env.SLIDESCI_NATIVE_DEBUG) error.message += `\n--- AppleScript ---\n${body}`;
     throw error;
   }
@@ -525,7 +547,7 @@ async function fragment(input, env = {}) {
   return { pptx: result.data, path: filename, shapeIds: refs.map(({ id }) => id), preview: preview.data, bounds };
 }
 function boundsFromContext(context, ids) { const selected = new Set(ids), shapes = []; const visit = (list) => { for (const shape of list || []) { if (selected.has(shape.id)) shapes.push(shape); if (shape.children) visit(shape.children); } }; visit(context?.shapes); if (!shapes.length) return undefined; const left = Math.min(...shapes.map((s) => s.left)), top = Math.min(...shapes.map((s) => s.top)); return { left, top, width: Math.max(...shapes.map((s) => s.left + s.width)) - left, height: Math.max(...shapes.map((s) => s.top + s.height)) - top }; }
-async function exportPresentation(input, env) {
+async function exportPresentationFiles(input, env, scratch) {
   const format = input.format || 'png';
   if (input.kind === 'original-images') {
     if (!input.pptx) throw new Error('Original image export requires the active-slide PPTX snapshot.');
@@ -538,21 +560,27 @@ async function exportPresentation(input, env) {
   let filename, selectionBounds;
   if (input.kind === 'selection') {
     const captured = await fragment({ ...input, preview: false }, env); selectionBounds = captured.bounds;
+    scratch.push(captured.path, captured.pdfPath);
     if (format === 'pptx') return [{ name: input.filename || 'selection.pptx', mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', data: captured.pptx, path: captured.path }];
     filename = captured.pdfPath || await renderPresentationPDF(captured.path, input.presentationName);
+    scratch.push(filename);
   } else if (input.pptx) {
     const data = input.indices?.length ? await env.pptx.selectSlides(input.pptx, input.indices) : input.pptx;
     const packaged = await materialize({ data, mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', name: 'slides.pptx' });
+    scratch.push(packaged.path);
     if (format === 'pptx') return [{ ...await descriptor(packaged.path, 'application/vnd.openxmlformats-officedocument.presentationml.presentation'), name: input.filename || 'slides.pptx' }];
     filename = await renderPresentationPDF(packaged.path, input.presentationName);
+    scratch.push(filename);
   } else {
     const temporary = await temporaryPath('pptx');
+    scratch.push(temporary);
     await preservingClipboard(async () => {
       const body = `set exportCopy to missing value\ntry\nset exportCopy to make new presentation\nrepeat while (count of slides of exportCopy) > 0\ndelete slide 1 of exportCopy\nend repeat\n` + (input.indices?.length ? input.indices.map((i) => `copy object (slide ${index(i) + 1} of targetPresentation)\npaste object exportCopy`).join('\n') : `repeat with sourceSlide in slides of targetPresentation\ncopy object sourceSlide\npaste object exportCopy\nend repeat`) + `\nsave exportCopy in (POSIX file ${asText(temporary)}) as save as Open XML presentation\nclose exportCopy saving no\nset exportCopy to missing value\ngo to slide (view of targetWindow) number (slide index of targetSlide)\non error errorText number errorNumber\nif exportCopy is not missing value then close exportCopy saving no\nerror errorText number errorNumber\nend try`;
       await appleScript(office(body, input.presentationName));
     });
     if (format === 'pptx') return [{ ...await descriptor(temporary, 'application/vnd.openxmlformats-officedocument.presentationml.presentation'), name: input.filename || 'slides.pptx' }];
     filename = await renderPresentationPDF(temporary, input.presentationName);
+    scratch.push(filename);
   }
   if (format === 'pdf') {
     if (selectionBounds) { const cropped = await helper('slicePDF', { path: filename, bounds: selectionBounds }); const file = await materialize({ ...cropped, name: input.filename || 'selection.pdf' }); return [{ ...cropped, ...file }]; }
@@ -574,6 +602,17 @@ async function exportPresentation(input, env) {
   for (const [i, page] of pages.entries()) { const name = input.filename && pages.length === 1 ? safeName(input.filename) : `slide-${(input.indices?.[i] ?? i) + 1}.${format}`; const materialized = await materialize({ ...page, name }); result.push({ ...page, ...materialized, name }); }
   return result;
 }
+// Intermediate copies (packaged deck, rendered PDF, captured fragment) are removed as soon as
+// the files handed back to the caller exist; returned files stay until the cache sweep.
+async function exportPresentation(input, env) {
+  const scratch = [];
+  let result;
+  try { result = await exportPresentationFiles(input, env, scratch); return result; }
+  finally {
+    const kept = new Set((result || []).map(file => file?.path && path.resolve(file.path)).filter(Boolean));
+    for (const file of new Set(scratch.filter(Boolean).map(item => path.resolve(item)))) if (!kept.has(file)) await discardCached(file).catch(() => {});
+  }
+}
 async function finishExport(input, env) {
   const result = await exportPresentation(input, env);
   for (const file of result) if (input.folder) {
@@ -591,11 +630,18 @@ async function nativeOSAction(input, env) {
       const filename = await temporaryPath(extension, input.host || 'powerpoint'); reservedFiles.add(path.resolve(filename)); return { path: filename };
     }
     case 'releaseFiles': {
-      const cache = await realpath(hostContainer(input.host || 'powerpoint'));
+      // Compare both the spelled and the symlink-resolved forms: issued files are recorded by
+      // realpath, reserved ones by their spelled path, and a home folder may sit behind a symlink.
+      const spelled = path.resolve(hostContainer(input.host || 'powerpoint'));
+      const cache = await realpath(spelled).catch(() => spelled);
       for (const filename of input.paths || []) {
-        const resolved = path.resolve(filename);
-        if (!resolved.startsWith(cache + path.sep) || (!reservedFiles.has(resolved) && !issuedFiles.has(resolved))) throw new Error('Only issued files in the host cache may be released.');
-        await rm(resolved, { recursive: true, force: true }); reservedFiles.delete(resolved); issuedFiles.delete(resolved);
+        if (typeof filename !== 'string' || !path.isAbsolute(filename)) throw new Error('Only issued files in the host cache may be released.');
+        const plain = path.resolve(filename), actual = await realpath(plain).catch(() => plain);
+        const inside = [plain, actual].some(value => value.startsWith(cache + path.sep) || value.startsWith(spelled + path.sep));
+        const owned = [plain, actual].some(value => reservedFiles.has(value) || issuedFiles.has(value));
+        if (!inside || !owned) throw new Error('Only issued files in the host cache may be released.');
+        await rm(actual, { recursive: true, force: true });
+        for (const value of [plain, actual]) { reservedFiles.delete(value); issuedFiles.delete(value); }
       }
       return {};
     }
@@ -631,7 +677,9 @@ async function watchStart(input = {}, env = {}) {
 async function watchStop({ id } = {}) { const stop = (child) => { child.slideSciStopping = true; child.kill('SIGTERM'); }; if (id) { const child = watches.get(id); if (child) stop(child); watches.delete(id); } else { for (const child of watches.values()) stop(child); watches.clear(); } return {}; }
 export const nativeHandlers = {
   execute, pickFiles, chooseFolder,
-  reveal: async (input, env) => { const filename = await realpath(input.path); return helper('reveal', { path: issuedFolders.has(filename) ? filename : await authorizeFile(filename, env) }); },
+  // Selecting a file in Finder discloses nothing to the caller, so a source path recorded in an
+  // older session (or on this Mac before a restart) can be shown without a fresh grant.
+  reveal: async (input) => { if (typeof input.path !== 'string' || !path.isAbsolute(input.path) || /[\x00-\x1f]/.test(input.path)) throw new Error('没有可显示的本机文件位置。'); const filename = await realpath(input.path).catch(() => { throw new Error('原始文件已不存在或已移动：' + input.path); }); return helper('reveal', { path: filename }); },
   fonts: async () => helper('fonts'),
   readClipboardFiles: async () => { const result = await helper('readClipboardFiles'); for (const file of result) issuedFiles.add(await realpath(file.path)); return result; },
   writeClipboard: async (input) => helper('writeClipboard', input),

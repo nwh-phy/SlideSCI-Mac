@@ -143,7 +143,9 @@ export async function enrichPowerPointSlides(slides) {
   }
   if (!jobs.length) return slides;
 
-  await host.run(async context => {
+  // Read-only: retried like the adapter's other reads when PowerPoint is briefly busy.
+  const run = async operation => { for (let attempt = 1; ; attempt++) { try { return await host.run(operation); } catch (error) { if (attempt >= 3 || (error?.code !== 'GeneralException' && error?.message !== 'GeneralException')) throw error; await new Promise(resolve => setTimeout(resolve, 250 * attempt)); } } };
+  await run(async context => {
     const presentationSlides = context.presentation.slides;
     const resolved = [];
     let level = [];
