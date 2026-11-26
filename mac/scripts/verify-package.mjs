@@ -2,22 +2,25 @@
 // Verifies a built installer ZIP in an isolated profile; it never touches the signed-in user's
 // PowerPoint/WPS registrations, keychain or trust settings.
 //
-//   node mac/scripts/verify-package.mjs <SlideSCI-Mac-x.y.z-darwin-arm64.zip> [--report report.json]
+//   node mac/scripts/verify-package.mjs <SlideSCI-Mac-x.y.z-darwin-arm64.zip> [--previous <上一版.zip>] [--report report.json] [--strict]
 //
 // The service start check needs ports 3000 and 3443; when another service owns them it is
-// reported as skipped, never stopped.
+// reported as skipped, never stopped. --previous installs that release first and upgrades it.
+// --strict (for CI, where nothing should be skipped) fails the run when any check was skipped.
 import * as fs from 'node:fs/promises';
 import net from 'node:net';
 import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash, X509Certificate } from 'node:crypto';
+import { parseArgs } from 'node:util';
+import { createHash, randomUUID, X509Certificate } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
-const [zip] = process.argv.slice(2).filter(value => !value.startsWith('--'));
-const reportIndex = process.argv.indexOf('--report');
-if (!zip) throw new Error('用法：verify-package.mjs <安装包.zip> [--report 报告.json]');
+const { values: flags, positionals } = parseArgs({ allowPositionals: true, options: { report: { type: 'string' }, previous: { type: 'string' }, strict: { type: 'boolean' } } });
+const [zip] = positionals;
+if (!zip || positionals.length > 1) throw new Error('用法：verify-package.mjs <安装包.zip> [--previous 上一版.zip] [--report 报告.json] [--strict]');
 const checks = [];
+const startedAt = new Date().toISOString();
 const exists = file => fs.access(file).then(() => true, () => false);
 const sha256 = data => createHash('sha256').update(data).digest('hex');
 async function check(name, run) {
@@ -137,9 +140,96 @@ await check('uninstall restores registrations and keeps user data', async () => 
   if (await fs.readFile(path.join(data, 'keep.txt'), 'utf8') !== 'user data') throw new Error('用户数据被改动');
 });
 
-const report = { zip: path.basename(zip), sha256: sha256(await fs.readFile(zip)), version: build?.version, startedAt: new Date().toISOString(), checks,
+// Each remaining check uses its own profile, so it starts from a clean slate.
+const fixtureProfile = async name => {
+  const home = path.join(sandbox, name);
+  await fs.mkdir(path.join(home, 'Library/Containers/com.microsoft.Powerpoint/Data/Documents/wef'), { recursive: true });
+  const addons = path.join(home, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/.kingsoft/wps/jsaddons');
+  await fs.mkdir(addons, { recursive: true });
+  await fs.writeFile(path.join(addons, 'publish.xml'), otherPlugin);
+  return home;
+};
+const commandIn = (folder, name, home, ...args) => run('/bin/bash', [path.join(folder, `${name}.command`), '--profile', home, ...args]);
+const quarantine = file => { try { return run('/usr/bin/xattr', ['-p', 'com.apple.quarantine', file]).trim(); } catch { return null; } };
+const extract = async (archive, name) => {
+  const target = path.join(sandbox, name);
+  await fs.mkdir(target);
+  execFileSync('/usr/bin/ditto', ['-x', '-k', archive, target]);
+  const [folder] = await fs.readdir(target);
+  return path.join(target, folder);
+};
+
+await check('a browser-downloaded copy installs and its native helper runs', async () => {
+  // Safari and Archive Utility quarantine every extracted file; Gatekeeper kills the unsigned helper
+  // when it runs from such a copy (exit 137). The quarantined helper is never run here.
+  const download = path.join(sandbox, 'downloaded.zip');
+  await fs.copyFile(zip, download);
+  run('/usr/bin/xattr', ['-w', 'com.apple.quarantine', `0083;${Math.floor(Date.now() / 1000).toString(16)};Safari;${randomUUID().toUpperCase()}`, download]);
+  const extracted = await extract(download, 'downloaded');
+  if (!quarantine(path.join(extracted, 'mac/bin/slidesci-native'))) throw new Error('模拟下载未能给解压文件加上隔离标记，本项无法验证');
+  const home = await fixtureProfile('downloaded profile');
+  commandIn(extracted, 'Install', home, '--trust-certificate', 'no');
+  const installed = path.join(home, 'Library/Application Support/SlideSCI-Mac');
+  const marked = ['runtime/bin/node', 'mac/bin/slidesci-native', 'Start.command'].filter(file => quarantine(path.join(installed, file)));
+  if (marked.length) throw new Error('安装后仍带隔离标记：' + marked.join('、'));
+  const fonts = JSON.parse(run(path.join(installed, 'mac/bin/slidesci-native'), [], { input: JSON.stringify({ action: 'fonts' }), stdio: ['pipe', 'pipe', 'pipe'] }));
+  if (!Array.isArray(fonts) || !fonts.length) throw new Error('安装后的原生辅助程序没有返回字体列表');
+  return { fonts: fonts.length };
+});
+
+let previousBuild;
+await check('upgrading from the previous release keeps registrations, data and one backup, and uninstall restores the original state', async () => {
+  if (!flags.previous) return { skipped: '未提供 --previous 上一版安装包' };
+  const older = await extract(flags.previous, 'previous');
+  previousBuild = JSON.parse(await fs.readFile(path.join(older, 'BUILD-INFO.json'), 'utf8'));
+  if (previousBuild.version === build.version) throw new Error(`上一版与当前版本相同：${build.version}`);
+  const home = await fixtureProfile('upgrade profile');
+  const support = path.join(home, 'Library/Application Support');
+  const installed = path.join(support, 'SlideSCI-Mac'), state = path.join(support, 'SlideSCI-Mac-Installer');
+  const manifestFile = path.join(home, 'Library/Containers/com.microsoft.Powerpoint/Data/Documents/wef/SlideSCI-Mac.xml');
+  const publishFile = path.join(home, 'Library/Containers/com.kingsoft.wpsoffice.mac/Data/.kingsoft/wps/jsaddons/publish.xml');
+  const backups = async () => (await fs.readdir(support)).filter(name => name.startsWith('SlideSCI-Mac.previous-'));
+  const ours = text => (text.match(/name="slidesci-mac-dev"/g) || []).length;
+
+  commandIn(older, 'Install', home, '--trust-certificate', 'no');
+  await fs.mkdir(path.join(support, 'SlideSCI Mac'), { recursive: true });
+  await fs.writeFile(path.join(support, 'SlideSCI Mac/keep.txt'), 'user data');
+  const certificate = await fs.readFile(path.join(state, 'tls/localhost.crt'));
+
+  const upgraded = commandIn(payload, 'Install', home, '--upgrade', 'yes', '--trust-certificate', 'no', '--clear-wef-cache', 'no');
+  if (!upgraded.includes(`已升级到 ${build.version}`)) throw new Error('升级输出异常：' + upgraded.trim().split('\n').at(-1));
+  const record = JSON.parse(await fs.readFile(path.join(state, 'installation.json'), 'utf8'));
+  const installedVersion = JSON.parse(await fs.readFile(path.join(installed, 'BUILD-INFO.json'), 'utf8')).version;
+  if (installedVersion !== build.version || record.version !== build.version) throw new Error(`升级后版本为 ${installedVersion} / ${record.version}`);
+  if (await fs.readFile(manifestFile, 'utf8') !== await fs.readFile(path.join(payload, 'mac/office/manifest.xml'), 'utf8')) throw new Error('PowerPoint 注册不是新版清单');
+  const publish = await fs.readFile(publishFile, 'utf8');
+  if (!publish.includes('other-addin') || ours(publish) !== 1) throw new Error('WPS 注册异常：' + publish);
+  if (record.registrations.some(item => item.prior !== null)) throw new Error('升级改写了安装前的注册记录');
+  const [backup, ...extra] = await backups();
+  if (!backup || extra.length) throw new Error('旧版程序备份数量应为 1');
+  const backedUp = JSON.parse(await fs.readFile(path.join(support, backup, 'BUILD-INFO.json'), 'utf8')).version;
+  if (backedUp !== previousBuild.version) throw new Error(`备份的是 ${backedUp}，不是 ${previousBuild.version}`);
+  if (!certificate.equals(await fs.readFile(path.join(state, 'tls/localhost.crt')))) throw new Error('升级换掉了已有的本机证书');
+
+  // A second upgrade keeps only the folder it just backed up.
+  commandIn(payload, 'Install', home, '--upgrade', 'yes', '--trust-certificate', 'no', '--clear-wef-cache', 'no');
+  const kept = await backups();
+  if (kept.length !== 1 || kept[0] === backup) throw new Error('再次升级后未只保留最近一份备份：' + kept.join('、'));
+
+  commandIn(installed, 'Uninstall', home);
+  if (await exists(manifestFile)) throw new Error('卸载后 PowerPoint 注册仍在');
+  const restored = await fs.readFile(publishFile, 'utf8');
+  if (!restored.includes('other-addin') || ours(restored)) throw new Error('卸载后 WPS 注册未恢复：' + restored);
+  if (await fs.readFile(path.join(support, 'SlideSCI Mac/keep.txt'), 'utf8') !== 'user data') throw new Error('用户数据被改动');
+  return { from: previousBuild.version, to: build.version };
+});
+
+const report = { zip: path.basename(zip), sha256: sha256(await fs.readFile(zip)), version: build?.version,
+  ...(flags.previous ? { previous: { zip: path.basename(flags.previous), sha256: sha256(await fs.readFile(flags.previous)), version: previousBuild?.version } } : {}),
+  startedAt, finishedAt: new Date().toISOString(), checks,
   passed: checks.filter(item => item.ok === true).length, failed: checks.filter(item => item.ok === false).length, skipped: checks.filter(item => item.ok === null).length };
-if (reportIndex > 0) await fs.writeFile(process.argv[reportIndex + 1], JSON.stringify(report, null, 2) + '\n');
+if (flags.report) await fs.writeFile(flags.report, JSON.stringify(report, null, 2) + '\n');
 await fs.rm(sandbox, { recursive: true, force: true });
 console.log(`通过 ${report.passed}，失败 ${report.failed}，跳过 ${report.skipped}。`);
-process.exitCode = report.failed ? 1 : 0;
+if (flags.strict && report.skipped) console.log('--strict：存在跳过的检查，按失败处理。');
+process.exitCode = report.failed || (flags.strict && report.skipped) ? 1 : 0;

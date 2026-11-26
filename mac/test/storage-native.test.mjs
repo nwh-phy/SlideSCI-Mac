@@ -1,17 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { mkdtemp, mkdir } from 'node:fs/promises';
 import os from 'node:os';
+import { promisify } from 'node:util';
 import { createFileServices } from '../lib/storage.mjs';
 import { nativeHandlers } from '../lib/native.mjs';
 
 // Never write into the real PowerPoint/WPS containers: run against a throwaway home whose
 // containers mirror the layout the services expect.
 const home = await mkdtemp(path.join(os.tmpdir(), 'slidesci-home-'));
-for (const id of ['com.microsoft.Powerpoint', 'com.kingsoft.wpsoffice.mac']) await mkdir(path.join(home, 'Library/Containers', id, 'Data/tmp'), { recursive: true });
 process.env.HOME = home;
 test.after(() => rm(home, { recursive: true, force: true }));
 
@@ -48,4 +49,36 @@ test('native cleanup refuses a file it did not issue even inside its cache', asy
     if (unissued) await rm(unissued, { force: true });
     await rm(env.workDir, { recursive: true, force: true });
   }
+});
+
+test('a fresh service releases only durably reserved WPS PPTX files', async () => {
+  const exec = promisify(execFile);
+  const script = `
+    import { nativeHandlers } from ${JSON.stringify(new URL('../lib/native.mjs', import.meta.url).href)};
+    const input = JSON.parse(process.argv[1]);
+    console.log(JSON.stringify(await nativeHandlers.execute({ ...input, host: 'wps' })));
+  `;
+  const runNative = async (input) => {
+    const { stdout } = await exec(process.execPath, ['--input-type=module', '--eval', script, JSON.stringify(input)]);
+    return JSON.parse(stdout);
+  };
+  const release = filename => runNative({ action: 'releaseFiles', paths: [filename] });
+  const { path: reserved } = await runNative({ action: 'temporaryPath', extension: 'pptx' });
+  const unissued = path.join(path.dirname(reserved), `${randomUUID()}.pptx`);
+  await writeFile(unissued, 'unissued', { flag: 'wx' });
+
+  await symlink(unissued, reserved);
+  await assert.rejects(release(reserved), /Only issued files/);
+  await rm(reserved);
+  await writeFile(reserved, 'issued', { flag: 'wx' });
+  await assert.rejects(runNative({ action: 'readFile', path: reserved }), /Choose this file/);
+
+  await release(reserved);
+  await assert.rejects(readFile(reserved), { code: 'ENOENT' });
+  await assert.rejects(release(unissued), /Only issued files/);
+  assert.equal(await readFile(unissued, 'utf8'), 'unissued');
+
+  await writeFile(reserved, 'replacement', { flag: 'wx' });
+  await assert.rejects(release(reserved), /Only issued files/);
+  assert.equal(await readFile(reserved, 'utf8'), 'replacement');
 });

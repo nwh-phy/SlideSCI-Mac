@@ -11,7 +11,6 @@ test('host cache copies accept multi-megabyte base64 and still reject malformed 
   const previous = process.env.HOME;
   process.env.HOME = home;
   try {
-    await mkdir(path.join(home, 'Library/Containers/com.microsoft.Powerpoint/Data/tmp'), { recursive: true });
     const bytes = Buffer.alloc(12 * 1024 * 1024, 0x5a);
     const file = await nativeHandlers.materialize({ data: bytes.toString('base64'), mime: 'image/bmp', name: 'slide-1.bmp', host: 'powerpoint' });
     assert.ok((await readFile(file.path)).equals(bytes));

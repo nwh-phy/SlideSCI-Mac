@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { lookup } from 'node:dns/promises';
 import { lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFileSync, fstatSync, ftruncateSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -35,13 +36,49 @@ Object.assign(env, await createFileServices(env));
 // Stay completely passive at startup so a login LaunchAgent never triggers macOS app-data or
 // automation prompts until the user invokes an advanced native action.
 const accessWarnings = [];
+// service.log is what users attach to bug reports. Each event is one timestamped line, the home
+// folder is written as ~ so a shared log does not carry the account name, and an error that keeps
+// repeating is counted rather than written again for ten minutes, so a loop cannot push the useful
+// lines out of the 5 MB log.
+const home = os.homedir();
+const REPEAT_WINDOW = 10 * 60 * 1000;
+let lastLogged = null;
+function flushRepeats() {
+  if (lastLogged?.repeats) console.log(`${new Date().toISOString()} （上一条又出现 ${lastLogged.repeats} 次）`);
+  if (lastLogged) lastLogged.repeats = 0;
+}
+function log(message, { error = false } = {}) {
+  const text = String(message).replaceAll(home, '~').replace(/\s*[\r\n]+\s*/g, ' ⏎ ').slice(0, 4000), now = Date.now();
+  if (lastLogged?.text === text && now - lastLogged.at < REPEAT_WINDOW) { lastLogged.repeats++; return; }
+  flushRepeats();
+  lastLogged = { text, at: now, repeats: 0 };
+  (error ? console.error : console.log)(`${new Date(now).toISOString()} ${text}`);
+}
+// The pane lists the last 30 service errors; each one is also written to service.log, in the
+// fuller form given as `logged` when there is one.
 const diagnostics = [];
-function diagnose(message) {
+function diagnose(message, logged = message) {
   diagnostics.push({ at: new Date().toISOString(), message: String(message || '服务错误').slice(0, 4000) });
   if (diagnostics.length > 30) diagnostics.shift();
+  log(logged || '服务错误', { error: true });
 }
 // A long-lived local service must log, not exit, when one request leaves a promise unhandled.
-process.on('unhandledRejection', error => { console.error('SlideSCI 未处理的异步错误：' + (error?.stack || error)); diagnose(error?.message || error); });
+process.on('unhandledRejection', error => diagnose(error?.message || error, 'SlideSCI 未处理的异步错误：' + (error?.stack || error)));
+// launchd opens the log once at login in append mode and the service may run for weeks, so the
+// service rotates its own log: copy it aside, then truncate in place (appends continue at the end).
+const LOG_LIMIT = 5 * 1024 * 1024;
+function rotateLog(file = process.env.SLIDESCI_LOG_FILE, fd = 1, limit = LOG_LIMIT) {
+  if (!file) return false;
+  try {
+    const output = fstatSync(fd), current = statSync(file);
+    if (!output.isFile() || output.ino !== current.ino || output.dev !== current.dev || output.size <= limit) return false;
+    copyFileSync(file, file + '.1');
+    ftruncateSync(fd, 0);
+    return true;
+  } catch { return false; }
+}
+rotateLog();
+setInterval(rotateLog, 3600 * 1000).unref();
 const clients = new Set();
 const watchLeases = new Map();
 const LEASE_GRACE = 60000;
@@ -138,7 +175,13 @@ const handlers = {
   },
   client: {
     error: input => {
-      diagnose(input.message || '客户端错误');
+      const message = String(input.message || '客户端错误');
+      // Which pane and action failed, plus the first frames of its stack, without the payload data.
+      const context = input.context && typeof input.context === 'object' ? input.context : {};
+      const where = [input.host, input.version, context.operation || context.action || context.panel]
+        .filter(value => typeof value === 'string' && value).map(value => value.slice(0, 80)).join(' ');
+      const frames = typeof input.stack === 'string' ? input.stack.split('\n').map(line => line.trim()).filter(line => line.startsWith('at ')).slice(0, 3) : [];
+      diagnose(message, `界面错误${where ? `（${where}）` : ''}：${message.slice(0, 1000)}${frames.length ? ' | ' + frames.join(' | ') : ''}`);
       return { recorded: true };
     },
     diagnostics: () => ({ entries: diagnostics })
@@ -185,7 +228,7 @@ async function broadcast(name, input) {
   }
 }
 for (const name of ['changed', 'mediaSource', 'clipboardImage', 'nativeError']) events.on(name, input => {
-  broadcast(name, input).catch(error => diagnose(error.message));
+  broadcast(name, input).catch(error => diagnose(error.message, '推送事件失败：' + error.message));
 });
 const mimes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.xml': 'application/xml; charset=utf-8',
@@ -239,6 +282,8 @@ async function serve(request, response) {
       'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
     response.end(request.method === 'HEAD' ? undefined : await readFile(filename));
   } catch (error) {
+    // The path only: the event stream carries its session token in the query string.
+    log(`${request.method} ${String(request.url || '').split('?')[0].slice(0, 200)} 失败：${error.message || error}`, { error: true });
     if (!response.headersSent) json(response, 400, { error: error.message || 'SlideSCI 操作失败。' });
     else response.end();
   }
@@ -249,9 +294,9 @@ function listen(server, port, host, label) {
     server.once('error', reject);
     server.listen(port, host, () => {
       server.off('error', reject);
-      server.on('error', error => { console.error(error.message); diagnose(error.message); });
+      server.on('error', error => diagnose(error.message, '服务连接错误：' + error.message));
       servers.push(server);
-      console.log('SlideSCI ' + label);
+      log('SlideSCI ' + label);
       resolve();
     });
   });
@@ -269,15 +314,21 @@ try {
       catch (error) { if (error.code !== 'EADDRNOTAVAIL') throw error; }
     }
     if (!bound) throw new Error(`无法在本机回环地址监听 ${httpsPort} 端口。`);
-  } else console.log('PowerPoint: 请提供已在 macOS 信任的本机证书 --cert <pem> --key <pem>。');
+  } else log('PowerPoint: 请提供已在 macOS 信任的本机证书 --cert <pem> --key <pem>。');
 } catch (error) {
-  console.error(error.code === 'EADDRINUSE' ? `SlideSCI 无法启动：端口 ${error.port} 已被其他程序占用（可能是另一个 SlideSCI 服务）。` : `SlideSCI 无法启动：${error.message}`);
+  log(error.code === 'EADDRINUSE' ? `SlideSCI 无法启动：端口 ${error.port} 已被其他程序占用（可能是另一个 SlideSCI 服务）。` : `SlideSCI 无法启动：${error.message}`, { error: true });
   await rm(env.workDir, { recursive: true, force: true }).catch(() => {});
-  process.exit(1);
+  // Under the login LaunchAgent a non-zero exit is restarted every 10 s; a taken port or a bad
+  // certificate does not heal by retrying, so exit cleanly and let Start.command report it.
+  process.exit(process.env.SLIDESCI_SUPERVISOR === 'launchd' ? 0 : 1);
 }
+// The versions a bug report needs, once per start.
+const macos = (await readFile('/System/Library/CoreServices/SystemVersion.plist', 'utf8').catch(() => ''))
+  .match(/<key>ProductVersion<\/key>\s*<string>([^<]+)<\/string>/)?.[1] || `Darwin ${os.release()}`;
+log(`SlideSCI ${version} 已启动（进程 ${process.pid}，Node ${process.version}，macOS ${macos}，${process.env.SLIDESCI_SUPERVISOR === 'launchd' ? '登录自启' : '手动启动'}）`);
 
 // Only sweep this process's own tmpdir workspace at startup; host container caches are never
-// touched until an advanced native action actually writes to that host container.
+// touched here (native.mjs sweeps a host cache when the service first writes into it).
 const CACHE_AGE = 24 * 3600 * 1000;
 async function sweepWorkDirs() {
   const cutoff = Date.now() - CACHE_AGE;
@@ -305,5 +356,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, async () => {
   try { await nativeHandlers.watchStop({}, env); } catch { /* the watcher exits with its parent */ }
   await Promise.all(servers.map(server => new Promise(resolve => { server.close(() => resolve()); server.closeAllConnections?.(); })));
   await rm(env.workDir, { recursive: true, force: true }).catch(() => {});
+  log(`SlideSCI 已停止（${signal}）`);
+  flushRepeats();
   process.exit(0);
 });

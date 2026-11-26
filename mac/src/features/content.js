@@ -75,6 +75,7 @@ export const actions = [
     fields: [theme],
     async run(ctx, values) {
       const context = await ctx.host.context({ scope: 'selection' });
+      const target = { presentationId: context.presentationId, slideId: context.slideId };
       const selected = textShapes(context);
       if (!selected.length) throw new Error('请先选择一个或多个含有 Markdown 内容的文本框，或将光标定位在文本框中。');
       const resolvedTheme = preferredTheme(ctx, values.theme);
@@ -91,8 +92,8 @@ export const actions = [
       });
       for (const { shape, result } of prepared) {
         warn(ctx, result);
-        await ctx.host.insertFragment(result.fragment);
-        await ctx.host.apply([{ op: 'delete', ids: [shape.id] }]);
+        await ctx.host.insertFragment(result.fragment, { target, readback: false });
+        await ctx.host.apply([{ op: 'delete', ids: [shape.id] }], { target, readback: false });
       }
       await ctx.refresh();
       return { converted: prepared.length, warnings: prepared.flatMap(entry => entry.result.warnings || []) };

@@ -248,7 +248,8 @@ class BackgroundTracking {
     const now = Date.now();
     // Each pasteboard holds one current value; a newer clipboard or drag capture supersedes the old one.
     this.pending = this.pending.filter(item => now - item.at < PENDING_LIFETIME && item.signature !== signature && item.channel !== channel);
-    const baselines = new Map([...this.knownByScope].map(([scope, ids]) => [scope, new Set(ids)]));
+    // A drag/drop has no reliable cached baseline: PowerPoint stops content polling while hidden.
+    const baselines = channel === 'drag' ? new Map() : new Map([...this.knownByScope].map(([scope, ids]) => [scope, new Set(ids)]));
     const candidate = {
       signature,
       channel,
@@ -350,16 +351,16 @@ class BackgroundTracking {
       const snapshot = await item.baselineReady;
       item.baselineReady = null;
       if (!snapshot) continue;
-      // On drop, the picture may already have landed; keep any pre-drop baseline recorded for this slide.
-      if (!(item.reason === 'drop' && item.baselines.has(snapshot.scope))) {
-        item.baselines.set(snapshot.scope, snapshot.ids);
-      }
+      // A drop observed after landing is deliberately left untouched. It cannot be
+      // distinguished from any other picture added since the last pane refresh.
+      item.baselines.set(snapshot.scope, snapshot.ids);
       if (!this.knownByScope.has(snapshot.scope)) this.knownByScope.set(snapshot.scope, new Set(snapshot.ids));
     }
     let rich = null;
     let scheduled = false;
     let deferred = false;
     for (const item of candidates) {
+      if (item.channel === 'drag' && !item.baselines.has(scope)) continue;
       let baseline = item.baselines.get(scope);
       if (!baseline) {
         if (this.knownByScope.has(scope)) {
@@ -418,6 +419,10 @@ class BackgroundTracking {
       }
       if (!fresh.length) continue;
       this.pending = this.pending.filter(entry => entry !== item);
+      if (fresh.length !== expected) {
+        this.status('无法唯一匹配新图片与来源文件，已保留幻灯片上的图片。', 'error');
+        continue;
+      }
       for (const shape of fresh) {
         const id = String(shape.id);
         handled.add(handledKey(id));
@@ -447,9 +452,7 @@ class BackgroundTracking {
     const files = candidate.files.length
       ? candidate.files
       : [await this.materializeClipboard(candidate)];
-    const limit = Math.min(files.length, fresh.length);
-    if (!limit) return;
-    const shapeIds = fresh.slice(0, limit).map(shape => shape.id);
+    const shapeIds = fresh.map(shape => shape.id);
     const ctx = {
       host: adapter,
       services: this.services,
@@ -458,7 +461,7 @@ class BackgroundTracking {
       notify: (message, kind = 'info') => this.notify(message, kind),
       refresh: () => adapter.summary()
     };
-    const result = await handleNativePaste(ctx, { files: files.slice(0, limit), position: candidate.position, shapeIds });
+    const result = await handleNativePaste(ctx, { files, position: candidate.position, shapeIds });
     try {
       const after = await adapter.context({ scope: 'slide', geometry: true });
       const scope = this.scopeOf(after);

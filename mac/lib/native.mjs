@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
-import { access, chmod, mkdir, readFile, realpath, stat, writeFile, rename, rm } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readdir, readFile, realpath, stat, writeFile, rename, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
+import { hostCacheDirectory, safeFilename } from './storage.mjs';
 
 const helperSource = fileURLToPath(new URL('../native/SlideSCI.swift', import.meta.url));
 const issuedFiles = new Set();
@@ -62,7 +63,7 @@ async function helperBinary() {
     try { await access(binary, constants.X_OK); return binary; } catch (error) { if (error.code !== 'ENOENT' && error.code !== 'EACCES') throw error; }
     const temporary = `${binary}-${randomUUID()}`;
     try {
-      await processCall('/usr/bin/xcrun', ['swiftc', '-O', '-swift-version', '5', helperSource, '-o', temporary, '-framework', 'AppKit', '-framework', 'Security', '-framework', 'PDFKit', '-framework', 'CoreImage', '-framework', 'ApplicationServices', '-framework', 'AVFoundation', '-framework', 'UniformTypeIdentifiers'], '', { timeout: 180000 });
+      await processCall('/usr/bin/xcrun', ['swiftc', '-O', '-swift-version', '5', helperSource, '-o', temporary, '-framework', 'AppKit', '-framework', 'PDFKit', '-framework', 'CoreImage', '-framework', 'ApplicationServices', '-framework', 'AVFoundation', '-framework', 'UniformTypeIdentifiers'], '', { timeout: 180000 });
       await chmod(temporary, 0o700); await rename(temporary, binary); return binary;
     } finally { await rm(temporary, { force: true }); }
   })().catch((error) => { compiling = undefined; throw error; });
@@ -72,10 +73,14 @@ async function helper(action, input = {}) {
   const output = await processCall(await helperBinary(), [], JSON.stringify({ ...input, action }));
   return JSON.parse(output);
 }
-function hostContainer(host = 'powerpoint') {
-  const id = host === 'wps' ? 'com.kingsoft.wpsoffice.mac' : host === 'powerpoint' ? 'com.microsoft.Powerpoint' : null;
-  if (!id) throw new Error('Unknown presentation host.');
-  return path.join(homedir(), 'Library', 'Containers', id, 'Data', 'tmp', 'SlideSCI-Mac');
+function hostContainer(host = 'powerpoint') { return hostCacheDirectory(host, homedir()); }
+const wpsPptxName = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.pptx$/;
+function wpsPptxReservations() {
+  return path.join(homedir(), 'Library', 'Application Support', 'SlideSCI Mac', 'wps-pptx-reservations');
+}
+async function lstatIfPresent(filename) {
+  try { return await lstat(filename); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
 const extensions = {
   'image/png': '.png', 'image/jpeg': '.jpg', 'image/tiff': '.tiff', 'image/bmp': '.bmp', 'image/gif': '.gif',
@@ -105,14 +110,49 @@ function shortName(name, limit = 180) {
   return (characters.join('') || 'media') + extension;
 }
 function safeName(name) { if (typeof name !== 'string' || !name || name === '.' || name === '..' || /[\x00-\x1f/\\:]/.test(name) || path.basename(name) !== name) throw new Error('Invalid output filename.'); return name; }
-// macOS asks before one app's process writes into another app's container; a denial must read as such.
+// The handoff folders are outside every app container, so a denial means the folder itself is unusable.
 function containerError(error, host) {
   if (!['EPERM', 'EACCES'].includes(error?.code)) return error;
   const name = host === 'wps' ? 'WPS' : 'PowerPoint';
-  return new Error(`macOS 拒绝访问 ${name} 的数据目录。请在“访问其他 App 的数据”提示中选择允许，或在“系统设置 → 隐私与安全性”中为运行 SlideSCI 服务的终端开启相应权限，然后重新运行 Start.command。`);
+  return new Error(`SlideSCI 后台服务无法读写与 ${name} 交换文件的文件夹 ${hostContainer(host).replace(homedir(), '~')}（${error.code}）。请检查该文件夹的权限后重试。`);
 }
+// Host caches hold intermediate copies only (exports, pasted pictures, style fragments, decks for
+// AppleScript); each is embedded or copied out within one operation. A cache is swept when this
+// service first writes into it, then at most once a day while it runs.
+// Media is kept because a host may link a video instead of embedding it.
+const HOST_CACHE_AGE = 24 * 3600 * 1000;
+const keptMedia = /\.(?:mp4|m4v|mov|webm|avi|wmv|asf|mpe?g|mpe|mp3|wav|m4a|aac)$/i;
+const hostCacheSweeps = new Map();
+async function sweepHostCache(directory, host) {
+  const cutoff = Date.now() - HOST_CACHE_AGE;
+  const actual = await realpath(directory);
+  for (const name of await readdir(actual)) {
+    if (keptMedia.test(name)) continue;
+    const file = path.join(actual, name);
+    try {
+      if ((await lstat(file)).mtimeMs >= cutoff) continue;
+      await rm(file, { recursive: true, force: true });
+      for (const value of [file, path.join(directory, name)]) { issuedFiles.delete(value); reservedFiles.delete(value); }
+      if (host === 'wps' && wpsPptxName.test(name)) await rm(path.join(wpsPptxReservations(), name), { force: true });
+    } catch { /* best effort: a file in use or already gone is retried by the next sweep */ }
+  }
+}
+async function hostCache(host) {
+  const directory = hostContainer(host);
+  await mkdir(directory, { recursive: true, mode: 0o700 }).catch((error) => { throw containerError(error, host); });
+  const last = hostCacheSweeps.get(directory);
+  if (!last || Date.now() - last.at >= HOST_CACHE_AGE) {
+    // Runs beside the current operation; it only removes files a day old, never the ones being written.
+    hostCacheSweeps.set(directory, { at: Date.now(), done: sweepHostCache(directory, host).catch(() => {}) });
+  }
+  return directory;
+}
+// A dropped TIFF is converted by the watcher straight into the frontmost host's cache.
+const cacheHosts = { 'com.microsoft.Powerpoint': 'powerpoint', 'com.kingsoft.wpsoffice.mac': 'wps' };
+// Lets tests wait for the sweeps that earlier writes started.
+export function hostCacheSweepsSettled() { return Promise.all([...hostCacheSweeps.values()].map(sweep => sweep.done)); }
 async function materialize({ data, mime = 'application/octet-stream', name, host = 'powerpoint' }) {
-  const directory = hostContainer(host); await mkdir(directory, { recursive: true, mode: 0o700 }).catch((error) => { throw containerError(error, host); });
+  const directory = await hostCache(host);
   const base = shortName(name ? safeName(name) : 'media');
   const filename = `${randomUUID()}-${base}${path.extname(base) ? '' : extensions[mime] || '.bin'}`;
   const output = path.join(directory, filename); await writeFile(output, decode(data), { mode: 0o600, flag: 'wx' }).catch((error) => { throw containerError(error, host); }); issuedFiles.add(await realpath(output)); return { path: output, name: name || path.basename(output), mime };
@@ -130,8 +170,7 @@ async function readIssued({ path: filename }, env) { const actual = await author
 async function nativeAsset(input, env) {
   if (!input.path) return (await materialize({ ...input, host: 'powerpoint' })).path;
   const filename = await authorizeFile(input.path, env);
-  await mkdir(hostContainer('powerpoint'), { recursive: true, mode: 0o700 });
-  const directory = await realpath(hostContainer('powerpoint'));
+  const directory = await realpath(await hostCache('powerpoint'));
   if (filename.startsWith(directory + path.sep)) return filename;
   return (await materialize({ data: (await readFile(filename)).toString('base64'), mime: input.mime || mimeTypes[path.extname(filename).toLowerCase()], name: path.basename(filename), host: 'powerpoint' })).path;
 }
@@ -155,6 +194,19 @@ function refExpression(ref, presentation = 'targetPresentation') {
 function refsFor(input) { return (input.refs || []).map((entry) => entry.ref ? entry : { id: entry.id || JSON.stringify(entry), ref: entry }); }
 const prelude = `use scripting additions\n`;
 const foundationPrelude = `use framework "Foundation"\n${prelude}`;
+// macOS asks once whether the process that runs osascript may control PowerPoint: the login item
+// is "node", a service started from a terminal is that terminal. -1743: not allowed (or refused);
+// -1712: the request timed out, as an unanswered prompt or a modal dialog in PowerPoint does.
+export function automationMessage(text, supervisor) {
+  const who = supervisor === 'launchd' ? '“node”（SlideSCI 后台服务）' : '启动 SlideSCI 服务的终端';
+  if (/-1743|not authori[sz]ed to send Apple events|不允许发送 Apple 事件/i.test(text)) {
+    return `macOS 尚未允许 SlideSCI 后台服务控制 PowerPoint。请在“系统设置 → 隐私与安全性 → 自动化”中，为${who}打开 Microsoft PowerPoint，然后重试。`;
+  }
+  if (/-1712|AppleEvent.*(timed out|已超时)/i.test(text)) {
+    return `PowerPoint 没有及时响应。如果出现“${supervisor === 'launchd' ? 'node' : '终端'}想要控制 Microsoft PowerPoint”的提示，请选择允许后重试（提示 3 分钟内无人回答会自动关闭）；也请确认 PowerPoint 没有打开中的对话框。`;
+  }
+  return null;
+}
 async function appleScript(body, { json = false } = {}) {
   // Loading Foundation changes how PowerPoint receives file specifiers: `open` and `save` silently fail or
   // open modal panels. Only JSON-returning scripts need it, so keep file operations on the plain prelude.
@@ -163,10 +215,7 @@ async function appleScript(body, { json = false } = {}) {
     const result = await processCall('/usr/bin/osascript', ['-'], script, { timeout: 190000 });
     return json ? JSON.parse(result) : result;
   } catch (error) {
-    const text = String(error.message || '');
-    // -1743: the user has not allowed (or refused) automation; -1712: an unanswered permission prompt or a modal dialog.
-    if (/-1743|not authori[sz]ed to send Apple events|不允许发送 Apple 事件/i.test(text)) error.message = 'macOS 尚未允许 SlideSCI 服务控制 PowerPoint。请在“系统设置 → 隐私与安全性 → 自动化”中，为运行 SlideSCI 的终端打开 Microsoft PowerPoint，然后重试。';
-    else if (/-1712|AppleEvent.*(timed out|已超时)/i.test(text)) error.message = 'PowerPoint 没有及时响应。如果屏幕上有“终端想要控制 Microsoft PowerPoint”的提示，请选择允许后重试；也请确认 PowerPoint 没有打开中的对话框。';
+    error.message = automationMessage(String(error.message || ''), process.env.SLIDESCI_SUPERVISOR) ?? error.message;
     if (process.env.SLIDESCI_NATIVE_DEBUG) error.message += `\n--- AppleScript ---\n${body}`;
     throw error;
   }
@@ -458,7 +507,7 @@ async function waitForFile(filename, timeout = 10000) {
   }
   throw new Error('PowerPoint did not finish writing the exported file.');
 }
-async function temporaryPath(extension, host = 'powerpoint') { const directory = hostContainer(host); await mkdir(directory, { recursive: true, mode: 0o700 }); return path.join(directory, `${randomUUID()}.${extension}`); }
+async function temporaryPath(extension, host = 'powerpoint') { const directory = await hostCache(host); return path.join(directory, `${randomUUID()}.${extension}`); }
 async function descriptor(filename, mime) { issuedFiles.add(await realpath(filename)); return { path: filename, name: path.basename(filename), mime, data: (await readFile(filename)).toString('base64') }; }
 async function insertFragment(input, env) {
   const fragment = input.fragment || input;
@@ -473,11 +522,34 @@ async function insertFragment(input, env) {
   // Capture geometry before PowerPoint applies its duplicate-paste offset.
   const sourceGeometry = bounds ? 'set sourceLeft to left position of sourceShape\nset sourceTop to top of sourceShape\nset sourceWidth to width of sourceShape\nset sourceHeight to height of sourceShape' : '';
   const transform = bounds ? `set lock aspect ratio of insertedShape to false\nset width of insertedShape to sourceWidth * ${sx}\nset height of insertedShape to sourceHeight * ${sy}\nset left position of insertedShape to ${number(left)} + (sourceLeft - ${number(bounds.left)}) * ${sx}\nset top of insertedShape to ${number(top)} + (sourceTop - ${number(bounds.top)}) * ${sy}` : '';
+  const targetId = input.slideId === undefined ? 'slide ID of targetSlide' : index(input.slideId);
+  let documentPath;
+  if (input.documentUrl?.startsWith('file://')) documentPath = fileURLToPath(input.documentUrl);
+  else if (input.documentUrl?.startsWith('/')) documentPath = input.documentUrl;
+  let documentGuard = '';
+  if (documentPath) {
+    const canonical = await realpath(documentPath).catch(() => documentPath);
+    const aliases = [...new Set([documentPath, canonical, canonical.replace(/^\/private(?=\/(?:var|tmp|etc)\/)/, '')])];
+    documentGuard = `if (full name of targetPresentation) is not in {${aliases.map(asText).join(', ')}} then error "请返回开始转换时的演示文稿。" number 1\n`;
+  }
+  const resolveSlide = `set targetPresentation to active presentation
+if (full name of targetPresentation) is not targetFullName then error "开始操作时的演示文稿已变化。" number 1
+set targetSlideNumber to 0
+repeat with candidateNumber from 1 to count of slides of targetPresentation
+if (slide ID of slide candidateNumber of targetPresentation) is targetSlideID then
+set targetSlideNumber to candidateNumber as integer
+exit repeat
+end if
+end repeat
+if targetSlideNumber is 0 then error "找不到开始操作时的幻灯片。" number 1
+set targetSlide to slide targetSlideNumber of targetPresentation`;
+  const paste = `go to slide (view of active window) number targetSlideNumber\nif (slide ID of slide of view of active window) is not targetSlideID then error "开始操作时的幻灯片已变化。" number 1\npaste object (view of active window)`;
+  const finish = `${resolveSlide}\non error errorText number errorNumber\nif sourcePresentation is not missing value then close sourcePresentation saving no\nerror errorText number errorNumber\nend try\nreturn ((count of shapes of targetSlide) - originalCount)`;
   return preservingClipboard(async () => {
     // Copying from another presentation requires closing it before pasting: while the source is open,
     // PowerPoint keeps it as the active presentation even after its window is brought forward, so the
     // target slide cannot be addressed. The clipboard survives closing the source.
-    const body = `set sourcePresentation to missing value\nset targetName to name of targetPresentation\nset targetSlideNumber to slide index of targetSlide\nset originalCount to count of shapes of targetSlide\nset sourceCount to 0\ntry\n${openFile(filename)}\nset sourcePresentation to active presentation\nset sourceCount to count of shapes of slide 1 of sourcePresentation\nclose sourcePresentation saving no\nset sourcePresentation to missing value\n${waitForPresentation('targetName')}\nrepeat with shapeNumber from 1 to sourceCount\n${openFile(filename)}\nset sourcePresentation to active presentation\nset sourceShape to shape shapeNumber of slide 1 of sourcePresentation\n${sourceGeometry}\ncopy shape sourceShape\nclose sourcePresentation saving no\nset sourcePresentation to missing value\n${waitForPresentation('targetName')}\ngo to slide (view of active window) number targetSlideNumber\npaste object (view of active window)\nset insertedShape to last shape of slide targetSlideNumber of presentation targetName\n${transform}\nend repeat\nset targetPresentation to presentation targetName\nset targetSlide to slide targetSlideNumber of targetPresentation\non error errorText number errorNumber\nif sourcePresentation is not missing value then close sourcePresentation saving no\nset targetPresentation to presentation targetName\nset targetSlide to slide targetSlideNumber of targetPresentation\nerror errorText number errorNumber\nend try\nreturn ((count of shapes of targetSlide) - originalCount)`;
+    const body = `${documentGuard}set sourcePresentation to missing value\nset targetName to name of targetPresentation\nset targetFullName to full name of targetPresentation\nset targetSlideID to ${targetId}\n${resolveSlide}\nset originalCount to count of shapes of targetSlide\ntry\n${openFile(filename)}\nset sourcePresentation to active presentation\nset sourceCount to count of shapes of slide 1 of sourcePresentation\nclose sourcePresentation saving no\nset sourcePresentation to missing value\n${waitForPresentation('targetName')}\nrepeat with shapeNumber from 1 to sourceCount\n${openFile(filename)}\nset sourcePresentation to active presentation\nset sourceShape to shape shapeNumber of slide 1 of sourcePresentation\n${sourceGeometry}\ncopy shape sourceShape\nclose sourcePresentation saving no\nset sourcePresentation to missing value\n${waitForPresentation('targetName')}\n${resolveSlide}\n${paste}\nset insertedShape to last shape of targetSlide\n${transform}\nend repeat\n${finish}`;
     const count = Number(await appleScript(office(body, input.presentationName))); env.events?.emit?.('changed', { host: 'powerpoint' }); return { inserted: count };
   });
 }
@@ -565,6 +637,10 @@ async function fragment(input, env = {}) {
   return { pptx: result.data, path: filename, shapeIds: refs.map(({ id }) => id), preview: preview.data, bounds };
 }
 function boundsFromContext(context, ids) { const selected = new Set(ids), shapes = []; const visit = (list) => { for (const shape of list || []) { if (selected.has(shape.id)) shapes.push(shape); if (shape.children) visit(shape.children); } }; visit(context?.shapes); if (!shapes.length) return undefined; const left = Math.min(...shapes.map((s) => s.left)), top = Math.min(...shapes.map((s) => s.top)); return { left, top, width: Math.max(...shapes.map((s) => s.left + s.width)) - left, height: Math.max(...shapes.map((s) => s.top + s.height)) - top }; }
+function pageExportStem(filename, format) {
+  const name = safeFilename(filename, 'slides'), extension = `.${format}`;
+  return name.toLowerCase().endsWith(extension) ? safeFilename(name.slice(0, -extension.length), 'slides') : name;
+}
 async function exportPresentationFiles(input, env, scratch) {
   const format = input.format || 'png';
   if (input.kind === 'original-images') {
@@ -612,16 +688,23 @@ async function exportPresentationFiles(input, env, scratch) {
       }
       return files;
     }
-    return [{ ...await descriptor(filename, 'application/pdf'), name: input.filename || 'slides.pdf' }];
+    const name = input.kind === 'selection' ? input.filename || 'slides.pdf' : `${pageExportStem(input.filename, 'pdf')}.pdf`;
+    return [{ ...await descriptor(filename, 'application/pdf'), name }];
   }
   if (!['png', 'jpg', 'bmp'].includes(format)) throw new Error(`Unknown export format: ${format}`);
   const pages = await helper('rasterPDF', { path: filename, dpi: input.dpi || 300, format, bounds: selectionBounds });
+  const stem = input.kind !== 'selection' && input.filename ? pageExportStem(input.filename, format) : undefined;
+  const selectionName = input.kind === 'selection' && input.filename && pages.length === 1 ? safeName(input.filename) : undefined;
   const result = [];
-  for (const [i, page] of pages.entries()) { const name = input.filename && pages.length === 1 ? safeName(input.filename) : `slide-${(input.indices?.[i] ?? i) + 1}.${format}`; const materialized = await materialize({ ...page, name }); result.push({ ...page, ...materialized, name }); }
+  for (const [i, page] of pages.entries()) {
+    const pageNumber = (input.indices?.[i] ?? i) + 1;
+    const name = selectionName || (stem ? `${stem}${pages.length > 1 ? `-${pageNumber}` : ''}.${format}` : `slide-${pageNumber}.${format}`);
+    result.push({ ...page, ...await materialize({ ...page, name }) });
+  }
   return result;
 }
 // Intermediate copies (packaged deck, rendered PDF, captured fragment) are removed as soon as
-// the files handed back to the caller exist; returned files stay until the cache sweep.
+// the files handed back to the caller exist; returned files stay until the daily host cache sweep.
 async function exportPresentation(input, env) {
   const scratch = [];
   let result;
@@ -645,20 +728,45 @@ async function nativeOSAction(input, env) {
     case 'temporaryPath': {
       const extension = String(input.extension || 'bin').replace(/^\./, '');
       if (!/^[a-zA-Z0-9]{1,12}$/.test(extension)) throw new Error('Invalid temporary file extension.');
-      const filename = await temporaryPath(extension, input.host || 'powerpoint'); reservedFiles.add(path.resolve(filename)); return { path: filename };
+      const host = input.host || 'powerpoint';
+      const durable = host === 'wps' && extension.toLowerCase() === 'pptx';
+      const filename = await temporaryPath(durable ? 'pptx' : extension, host);
+      if (durable) {
+        const directory = wpsPptxReservations();
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        if (!(await lstat(directory)).isDirectory()) throw new Error('Invalid WPS PPTX reservation directory.');
+        await writeFile(path.join(directory, path.basename(filename)), '', { flag: 'wx', mode: 0o600 });
+      }
+      reservedFiles.add(path.resolve(filename));
+      return { path: filename };
     }
     case 'releaseFiles': {
-      // Compare both the spelled and the symlink-resolved forms: issued files are recorded by
-      // realpath, reserved ones by their spelled path, and a home folder may sit behind a symlink.
-      const spelled = path.resolve(hostContainer(input.host || 'powerpoint'));
+      const host = input.host || 'powerpoint';
+      const spelled = path.resolve(hostContainer(host));
       const cache = await realpath(spelled).catch(() => spelled);
       for (const filename of input.paths || []) {
-        if (typeof filename !== 'string' || !path.isAbsolute(filename)) throw new Error('Only issued files in the host cache may be released.');
-        const plain = path.resolve(filename), actual = await realpath(plain).catch(() => plain);
-        const inside = [plain, actual].some(value => value.startsWith(cache + path.sep) || value.startsWith(spelled + path.sep));
-        const owned = [plain, actual].some(value => reservedFiles.has(value) || issuedFiles.has(value));
-        if (!inside || !owned) throw new Error('Only issued files in the host cache may be released.');
-        await rm(actual, { recursive: true, force: true });
+        const denied = () => new Error('Only issued files in the host cache may be released.');
+        if (typeof filename !== 'string' || !path.isAbsolute(filename)) throw denied();
+        const plain = path.resolve(filename), name = path.basename(plain);
+        let actual, marker;
+        if (host === 'wps' && wpsPptxName.test(name)) {
+          if (path.dirname(plain) !== spelled) throw denied();
+          const directory = wpsPptxReservations();
+          marker = path.join(directory, name);
+          if (!(await lstatIfPresent(directory))?.isDirectory() || !(await lstatIfPresent(marker))?.isFile()) throw denied();
+          actual = path.join(cache, name);
+          // A failed WPS export may never have created the file. Reject symlinks, even broken ones.
+          const file = await lstatIfPresent(plain);
+          if (file && (!file.isFile() || await realpath(plain) !== actual)) throw denied();
+        } else {
+          actual = await realpath(plain).catch(() => plain);
+          const inside = actual.startsWith(cache + path.sep) || (actual === plain && plain.startsWith(spelled + path.sep));
+          const owned = [plain, actual].some(value => reservedFiles.has(value) || issuedFiles.has(value));
+          const durable = host === 'wps' && path.dirname(actual) === cache && wpsPptxName.test(path.basename(actual));
+          if (!inside || !owned || durable) throw denied();
+        }
+        await rm(actual, { recursive: !marker, force: true });
+        if (marker) await rm(marker, { force: true });
         for (const value of [plain, actual]) { reservedFiles.delete(value); issuedFiles.delete(value); }
       }
       return {};
@@ -688,7 +796,7 @@ async function watchStart(input = {}, env = {}) {
   child.stdin.end(JSON.stringify({ ...input, action: 'watch' }));
   child.stderr.on('data', (chunk) => { if (errors.length < 4096) errors += chunk.toString('utf8'); });
   child.on('error', (error) => settleReady(error));
-  child.stdout.on('data', (chunk) => { buffer += chunk.toString('utf8'); let newline; while ((newline = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); try { const event = JSON.parse(line); if (event.type === 'ready') settleReady(null, { id, ...event }); else if (!shouldSuppressWatchEvent(event)) { for (const file of event.files || []) issuedFiles.add(path.resolve(file.path)); env.events?.emit?.(event.type === 'nativeError' ? 'nativeError' : event.type === 'hostChanged' ? 'changed' : 'mediaSource', event); } } catch (error) { env.events?.emit?.('nativeError', { message: error.message }); } } });
+  child.stdout.on('data', (chunk) => { buffer += chunk.toString('utf8'); let newline; while ((newline = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); try { const event = JSON.parse(line); if (event.type === 'ready') settleReady(null, { id, ...event }); else if (!shouldSuppressWatchEvent(event)) { if (event.reason === 'drop' && Object.hasOwn(cacheHosts, event.host || '')) hostCache(cacheHosts[event.host]).catch(() => {}); for (const file of event.files || []) issuedFiles.add(path.resolve(file.path)); env.events?.emit?.(event.type === 'nativeError' ? 'nativeError' : event.type === 'hostChanged' ? 'changed' : 'mediaSource', event); } } catch (error) { env.events?.emit?.('nativeError', { message: error.message }); } } });
   child.on('close', (code) => { watches.delete(id); if (!readySettled) settleReady(new Error(errors || 'Native watcher exited before start.')); else if (code && !child.slideSciStopping) env.events?.emit?.('nativeError', { message: errors || 'Native watcher exited.' }); });
   watches.set(id, child); return ready;
 }
@@ -701,9 +809,6 @@ export const nativeHandlers = {
   fonts: async () => helper('fonts'),
   readClipboardFiles: async () => { const result = await helper('readClipboardFiles'); for (const file of result) issuedFiles.add(await realpath(file.path)); return result; },
   writeClipboard: async (input) => noteClipboardWrite(await helper('writeClipboard', input)),
-  keychainGet: async ({ account }) => helper('keychainGet', { account, service: 'SlideSCI.AI' }),
-  keychainSet: async ({ account, secret }) => { if (typeof secret !== 'string') throw new Error('A keychain secret string is required.'); return helper('keychainSet', { account, secret, service: 'SlideSCI.AI' }); },
-  keychainDelete: async ({ account }) => helper('keychainDelete', { account, service: 'SlideSCI.AI' }),
   materialize: input => materialize(input),
   read: async (input, env) => env?.files?.read ? env.files.read(input.path) : readIssued(input, env),
   write: async (input, env) => env?.files?.write ? env.files.write(input) : writeIssued(input),

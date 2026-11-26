@@ -1,0 +1,67 @@
+name: Mac
+
+# Unit tests on every change to the Mac port, then a real installer build that is verified in an
+# isolated profile (install, service start, quarantined download, upgrade from the last release,
+# certificate renewal, uninstall). The verified ZIP is kept as a workflow artifact for testers.
+on:
+  push:
+    branches: [main]
+    paths: ['mac/**', 'SlideSCI/latex-converter/**', '.github/workflows/mac.yml']
+  pull_request:
+    paths: ['mac/**', 'SlideSCI/latex-converter/**', '.github/workflows/mac.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac:
+    # Apple Silicon, like every supported install. Everything runs in one job because macOS arm64
+    # runners are scarce: each job waits for its own runner, and GitHub has failed runs whose job
+    # was never acquired by one.
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # The version bundled in the installer (scripts/distribution.mjs).
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mac/package-lock.json
+      - run: npm ci
+        working-directory: mac
+      - name: Unit tests
+        run: npm test
+        working-directory: mac
+      - name: Build the installer ZIP
+        run: node mac/scripts/distribution.mjs build --output "$RUNNER_TEMP/dist"
+      - name: Download the latest earlier release to test upgrades
+        run: |
+          current=$(node -p "require('./mac/package.json').version")
+          tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName --jq '.[].tagName' | grep '^mac-v' | grep -vx "mac-v$current" | head -n 1 || true)
+          if [ -z "$tag" ]; then echo "::error::No earlier mac-v* release to upgrade from."; exit 1; fi
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern 'SlideSCI-Mac-*-darwin-arm64.zip*' --dir "$RUNNER_TEMP/previous"
+          cd "$RUNNER_TEMP/previous" && shasum -a 256 -c ./*.sha256
+          echo "Upgrading from $tag"
+      - name: Verify the package in an isolated profile
+        run: |
+          zip=$(ls "$RUNNER_TEMP"/dist/SlideSCI-Mac-*-darwin-arm64.zip)
+          previous=$(ls "$RUNNER_TEMP"/previous/SlideSCI-Mac-*-darwin-arm64.zip)
+          node mac/scripts/verify-package.mjs "$zip" --previous "$previous" --report "$RUNNER_TEMP/dist/INSTALL-VERIFICATION.json" --strict
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: slidesci-mac-package
+          path: |
+            ${{ runner.temp }}/dist/*.zip
+            ${{ runner.temp }}/dist/*.zip.sha256
+            ${{ runner.temp }}/dist/INSTALL-VERIFICATION.json
+          if-no-files-found: ignore
+          retention-days: 14

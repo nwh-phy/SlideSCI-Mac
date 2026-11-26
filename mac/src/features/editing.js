@@ -4,8 +4,36 @@ import {
 } from './editing-geometry.js';
 
 const geometryKeys = new Set(['left', 'top', 'width', 'height', 'rotation']);
+const needsRichScale = shapes => flatten(shapes).some(shape => !['picture', 'media'].includes(shape.type));
+const richTextKeys = ['font', 'runs', 'paragraphs'];
+// Keep selection-time geometry; only borrow rich text data so scaling never compounds
+// geometry that earlier spacing edits already moved.
+function mergeRichShape(baseline, rich) {
+  if (!rich) return baseline;
+  const merged = { ...baseline };
+  for (const key of richTextKeys) if (rich[key] !== undefined) merged[key] = structuredClone(rich[key]);
+  if (baseline.children?.length) {
+    const richById = new Map(flatten(rich.children || []).map(shape => [String(shape.id), shape]));
+    merged.children = baseline.children.map(child => mergeRichShape(child, richById.get(String(child.id))));
+  }
+  return merged;
+}
+const selectionKey = list => [...(list || [])].map(String).sort().join('\u0000');
+function sameSurface(baseline, rich) {
+  return Boolean(rich) && baseline.presentationId === rich.presentationId && baseline.slideId === rich.slideId
+    && selectionKey(baseline.selectionIds) === selectionKey(rich.selectionIds);
+}
+async function richBaseline(ctx, baseline) {
+  const rich = await ctx.host.context({ scope: 'selection' });
+  if (!sameSurface(baseline, rich)) throw new Error('选择或页面已变化，请重新读取选择后再调整。');
+  const byId = new Map(flatten(rich.shapes || []).map(shape => [String(shape.id), shape]));
+  return { ...structuredClone(baseline), shapes: baseline.shapes.map(shape => mergeRichShape(shape, byId.get(String(shape.id)))) };
+}
 const section = '排版与编辑';
 const session = new WeakMap();
+const TITLE_BATCH_TAG = 'SLIDESCI_TITLE_BATCH';
+const TITLE_OWNER_TAG = 'SLIDESCI_TITLE_OWNER';
+let titleBatchSequence = 0;
 const selectField = (name, label, options, value) => ({ name, label, type: 'select', options: options.map(([value, label]) => ({ value, label })), default: value });
 const numericField = (name, label, value, min, max, step = 1) => ({ name, label, type: 'number', default: value, min, max, step });
 const checkField = (name, label, value) => ({ name, label, type: 'checkbox', default: value });
@@ -306,6 +334,8 @@ const definitions = [
       { op: 'select', ids: replacement.map(shape => shape.id) }]);
   }, '采用复制组的可编辑结构与格式，按位置把目标文字填入模板；当模板文本框更多时可按行分配。'),
   makeAction('scaleTogether', '图文同比缩放', [numericField('percent', '缩放比例 (%)', 100, 1, 10000)], async (ctx, values) => {
+    const { shapes: lightShapes } = await selection(ctx, 1, true);
+    if (!needsRichScale(lightShapes)) return apply(ctx, scale(lightShapes, values.percent));
     const { shapes } = await selection(ctx);
     return apply(ctx, scale(shapes, values.percent));
   }, '以选择区域左上角为基准，同时缩放对象位置、宽高和各级组内文字字号。'),
@@ -317,40 +347,90 @@ const definitions = [
   }),
 ];
 
+function titleBatchMarker() {
+  titleBatchSequence += 1;
+  return `${Date.now().toString(36)}-${titleBatchSequence}-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
+}
+
+const tagValue = value => String(value ?? '').toUpperCase();
+function ownedTitles(context, marker) {
+  return flatten(context?.shapes || []).filter(shape => tagValue(shape.tags?.[TITLE_BATCH_TAG]) === marker);
+}
+
+// Only top-level groups are ours: a title cannot enter a preexisting group unless this
+// action created that group, so preexisting groups are never ungrouped. WPS may create a
+// group before its name/tags are written, so membership in this run's tagged titles counts too.
+function ownedGroups(context, marker, before) {
+  return context.shapes.filter(shape => !before.has(String(shape.id)) && shape.type === 'group'
+    && (tagValue(shape.tags?.[TITLE_BATCH_TAG]) === marker
+      || shape.children?.some(child => tagValue(child.tags?.[TITLE_BATCH_TAG]) === marker)))
+    .map(shape => String(shape.id));
+}
+
+async function rollbackTitles(ctx, marker, before, target, originalError) {
+  try {
+    let current = await ctx.host.context({ scope: 'slide', geometry: true, tags: true, target });
+    const groups = ownedGroups(current, marker, before);
+    if (groups.length) {
+      // Undo the groups this action created; originals are restored, never deleted.
+      await ctx.host.apply(groups.map(id => ({ op: 'ungroup', id })), { readback: false, target });
+      // Ungrouping may recreate child IDs, so find the titles again by tag instead of by ID.
+      current = await ctx.host.context({ scope: 'slide', geometry: true, tags: true, target });
+    }
+    const ids = ownedTitles(current, marker).map(shape => String(shape.id));
+    if (ids.length) await ctx.host.apply([{ op: 'delete', ids }], { readback: false, target });
+  } catch (cleanupError) {
+    throw new AggregateError([originalError, cleanupError], `${originalError.message}；无法撤销本次新增标题：${cleanupError.message}`);
+  }
+  throw originalError;
+}
+
 async function addTitles(ctx, values, below) {
   const snapshot = await ctx.host.context({ scope: 'slide', geometry: true });
+  const target = { presentationId: snapshot.presentationId, slideId: snapshot.slideId };
   const shapes = selected(snapshot, 1);
   const fontSize = number(values.fontSize, '字号', { min: 0.01 });
   const distance = number(values.distance, '标题距离');
   if (!String(values.fontName).trim()) throw new Error('请输入标题字体名称。');
-  const created = [];
-  const resultIds = [];
-  let current = snapshot;
+  const marker = titleBatchMarker();
+  const owner = shape => `${marker}|${tagValue(shape.id)}`;
+  const before = new Set(flatten(snapshot.shapes || []).map(shape => String(shape.id)));
   try {
-    for (const shape of shapes) {
+    const insertCommands = shapes.map(shape => {
       const top = below ? shape.top + shape.height + distance : shape.top - fontSize * 2 - distance;
-      const next = await apply(ctx, [{ op: 'insertText', text: String(values.text), left: shape.left, top, width: shape.width, height: fontSize * 2,
+      return {
+        op: 'insertText', text: String(values.text), left: shape.left, top, width: shape.width, height: fontSize * 2,
         font: { name: values.fontName.trim(), nameFarEast: values.fontName.trim(), size: fontSize },
         paragraphs: [{ runs: [{ text: String(values.text) }], alignment: values.center ? 'center' : 'left' }],
-        textFrame: { wordWrap: true, autoSize: 'shapeToFitText' }, name: `${shape.name} 标题` }]);
-      const inserted = newShapes(current, next);
-      created.push(...inserted.map(item => item.id));
-      if (inserted.length !== 1) throw new Error('标题插入后未找到新增文本框。');
-      current = next;
-      if (values.autoGroup) {
-        const grouped = await apply(ctx, [{ op: 'group', ids: [shape.id, inserted[0].id], name: `${shape.name} 与标题` }]);
-        const old = new Set(current.shapes.map(item => String(item.id)));
-        const group = grouped.shapes.find(item => !old.has(String(item.id)));
-        if (!group) throw new Error('编组后未返回新增组。');
-        resultIds.push(group.id);
-        current = grouped;
-      } else resultIds.push(inserted[0].id);
+        textFrame: { wordWrap: true, autoSize: 'shapeToFitText' }, name: `${shape.name} 标题`,
+        tags: { [TITLE_BATCH_TAG]: marker, [TITLE_OWNER_TAG]: owner(shape) }
+      };
+    });
+    // Insert without a rich readback; WPS would otherwise export the whole deck here.
+    await ctx.host.apply(insertCommands, { readback: false, target });
+    // Pair each new title with the object it belongs to by tag; readback order is not selection order.
+    const tagged = await ctx.host.context({ scope: 'slide', geometry: true, tags: true, target });
+    const inserted = ownedTitles(tagged, marker);
+    if (inserted.length !== shapes.length) throw new Error('标题插入后未找到新增文本框。');
+    const byOwner = new Map(inserted.map(item => [tagValue(item.tags?.[TITLE_OWNER_TAG]), item]));
+    const pairs = shapes.map(shape => [shape, byOwner.get(owner(shape))]);
+    if (pairs.some(([, title]) => !title)) throw new Error('标题插入后未能按对象匹配新增文本框。');
+    if (!values.autoGroup) {
+      return await ctx.host.apply([{ op: 'select', ids: inserted.map(item => item.id) }], { target, readback: false });
     }
-    return apply(ctx, [{ op: 'select', ids: resultIds }]);
+    const groupCommands = pairs.map(([shape, title]) => ({
+      op: 'group', ids: [shape.id, title.id], name: `${shape.name} 与标题`,
+      tags: { [TITLE_BATCH_TAG]: marker, [TITLE_OWNER_TAG]: owner(shape) }
+    }));
+    await ctx.host.apply(groupCommands, { readback: false, target });
+    const grouped = await ctx.host.context({ scope: 'slide', geometry: true, tags: true, target });
+    const groups = grouped.shapes.filter(shape => shape.type === 'group' && tagValue(shape.tags?.[TITLE_BATCH_TAG]) === marker);
+    if (groups.length !== shapes.length) throw new Error('编组后未返回新增组。');
+    return await ctx.host.apply([{ op: 'select', ids: groups.map(item => item.id) }], { target, readback: false });
   } catch (error) {
-    // A grouped original must remain intact if a later insertion fails.
-    const live = await ctx.host.context({ scope: 'slide', geometry: true });
-    return rollback(ctx, created.filter(id => live.shapes.some(shape => String(shape.id) === String(id))), error);
+    // Titles and groups are owned by this run's tag, so a partially applied batch is undoable
+    // without touching originals, preexisting groups, or unrelated shapes.
+    return rollbackTitles(ctx, marker, before, target, error);
   }
 }
 
@@ -378,8 +458,10 @@ definitions.push(
     return { message: `已添加 ${ids.length} 个标签。` };
   }),
   makeAction('updateLabels', '更新图片标签', labelFields, async (ctx, values) => {
-    const { shapes } = await selection(ctx, 1, true);
-    const targets = ordered(shapes.filter(shape => shape.type === 'text'), 'position');
+    // textMeta marks rectangles and placeholders that hold text, so labels drawn as shapes still count.
+    const snapshot = await ctx.host.context({ scope: 'selection', geometry: true, textMeta: true });
+    const shapes = selected(snapshot, 1);
+    const targets = ordered(shapes.filter(shape => shape.type === 'text' || shape.hasText === true), 'position');
     if (!targets.length) throw new Error('请选择要更新标签的文本框。');
     const fontSize = number(values.fontSize, '标签字号', { min: 0.01 });
     const start = number(values.startIndex, '起始编号', { min: 1, max: Number.MAX_SAFE_INTEGER - targets.length, integer: true });
@@ -427,11 +509,12 @@ export const panels = [{
   id: 'editing.controls', label: '编辑设置与实时调整', section,
   async mount(container, ctx) {
     let disposed = false;
-    let applying = false;
     let liveSnapshot;
+    let liveRich = false;
     let signature = '';
     let activeOperation = Promise.resolve();
     let changePending = false;
+    let selectionDirty = false;
     const pendingInputs = new Map();
     let liveScheduled = false;
     const chooser = element('select');
@@ -495,6 +578,42 @@ export const panels = [{
     const liveFields = [numericField('scale', '图文比例 (%)', 100, 1, 500, 1),
       numericField('horizontal', '水平间距 (cm)', 0.5, -100, 100, 0.01), numericField('vertical', '垂直间距 (cm)', 0.5, -100, 100, 0.01)];
     live.append(status, reset);
+    function scheduleLive() {
+      if (liveScheduled || disposed) return;
+      liveScheduled = true;
+      activeOperation = activeOperation.then(async () => {
+        const updateSelection = async () => {
+          while (!disposed && selectionDirty) {
+            selectionDirty = false;
+            await refreshSelection();
+          }
+        };
+        try {
+          while (!disposed && pendingInputs.size) {
+            await updateSelection();
+            if (disposed) return;
+            const [name, value] = pendingInputs.entries().next().value;
+            pendingInputs.delete(name);
+            if (!liveSnapshot) await capture();
+            if (name === 'scale' && !liveRich && needsRichScale(selected(liveSnapshot, 1))) {
+              liveSnapshot = await richBaseline(ctx, liveSnapshot);
+              if (disposed) return;
+              liveRich = true;
+            }
+            const shapes = selected(liveSnapshot, name === 'scale' ? 1 : 2);
+            const commands = name === 'scale' ? scale(shapes, value) : spacing(shapes, name, value);
+            await apply(ctx, commands);
+            await ctx.settings.set(`editing.live.${name}`, Number(value));
+          }
+          if (!disposed) await ctx.refresh();
+          await updateSelection();
+        } catch (error) { pendingInputs.clear(); ctx.notify(error.message, 'error'); }
+        finally {
+          liveScheduled = false;
+          if (!disposed && pendingInputs.size) scheduleLive();
+        }
+      });
+    }
     for (const field of liveFields) {
       const control = fieldControl(field, field.default);
       const slider = element('input');
@@ -511,33 +630,17 @@ export const panels = [{
         else slider.value = control.input.value;
         pendingInputs.delete(field.name);
         pendingInputs.set(field.name, control.input.value);
-        if (liveScheduled) return;
-        liveScheduled = true;
-        activeOperation = activeOperation.then(async () => {
-          applying = true;
-          try {
-            while (!disposed && pendingInputs.size) {
-              const [name, value] = pendingInputs.entries().next().value;
-              pendingInputs.delete(name);
-              if (!liveSnapshot) await capture();
-              const shapes = selected(liveSnapshot, name === 'scale' ? 1 : 2);
-              const commands = name === 'scale' ? scale(shapes, value) : spacing(shapes, name, value);
-              await apply(ctx, commands);
-              await ctx.settings.set(`editing.live.${name}`, Number(value));
-            }
-            if (!disposed) await ctx.refresh();
-          } catch (error) { pendingInputs.clear(); ctx.notify(error.message, 'error'); }
-          finally { applying = false; liveScheduled = false; }
-        });
+        scheduleLive();
       };
       control.input.addEventListener('input', () => change(control.input));
       slider.addEventListener('input', () => change(slider));
     }
     container.append(live);
     async function capture() {
-      const snapshot = await ctx.host.context({ scope: 'selection' });
+      const snapshot = await ctx.host.context({ scope: 'selection', geometry: true });
       if (disposed) return;
       liveSnapshot = structuredClone(snapshot);
+      liveRich = false;
       signature = JSON.stringify([snapshot.presentationId, snapshot.slideId, snapshot.selectionIds]);
       const shapes = snapshot.selectionIds.length ? selected(snapshot) : [];
       status.textContent = `已选中 ${shapes.length} 个对象；最先选择的对象为间距基准。`;
@@ -556,19 +659,27 @@ export const panels = [{
     reset.addEventListener('click', () => {
       activeOperation = activeOperation.then(capture).catch(error => ctx.notify(error.message, 'error'));
     });
+    async function refreshSelection() {
+      const snapshot = await ctx.host.summary({ slides: false });
+      if (disposed) return;
+      const next = JSON.stringify([snapshot.presentationId, snapshot.slideId, snapshot.selectionIds]);
+      if (next !== signature) await capture();
+    }
     const unsubscribe = ctx.host.onChanged(() => {
-      if (disposed || applying || changePending) return;
+      if (disposed) return;
+      selectionDirty = true;
+      if (liveScheduled || changePending) return;
       changePending = true;
       activeOperation = activeOperation.then(async () => {
         try {
-          if (disposed) return;
-          const snapshot = await ctx.host.summary({ slides: false });
-          const next = JSON.stringify([snapshot.presentationId, snapshot.slideId, snapshot.selectionIds]);
-          if (next !== signature) await capture();
+          while (!disposed && selectionDirty) {
+            selectionDirty = false;
+            await refreshSelection();
+          }
         } catch (error) { if (!disposed) ctx.notify(error.message, 'error'); }
         finally { changePending = false; }
       });
-    });
+    }, { mode: 'selection' });
     try { await capture(); } catch (error) { ctx.notify(error.message, 'error'); }
     return () => { disposed = true; renderId++; unsubscribe(); container.replaceChildren(); };
   },

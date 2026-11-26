@@ -1,10 +1,10 @@
-import { FOV_PREFIX, SCALE_PREFIX, UUID_TAG, RECORDS_TAG, ZOOM_TAG, SCALE_OWNER, uuid, units, unitOptions, positive, tag, parse, content, flatten, selected, pictures, isImage, fovOf, visibleFov, validFov, defaultScale, scaleOf, scaleLayout, writeRecord, localBounds, markerBounds, relativeRegion, geometry, near, guideSegments, lineBounds, element, control, imageFor, ensureUUID, findUUID } from './images-science-core.js';
+import { FOV_PREFIX, SCALE_PREFIX, UUID_TAG, RECORDS_TAG, ZOOM_TAG, SCALE_OWNER, uuid, units, unitOptions, positive, tag, parse, content, flatten, selected, pictures, isImage, fovOf, visibleFov, validFov, defaultScale, scaleOf, scaleLayout, writeRecord, localBounds, markerBounds, relativeRegion, geometry, near, guideSegments, lineBounds, element, control, imageFor, ensureUUID, findUUID, formatAmount } from './images-science-core.js';
 import { imageIdentity, serializeTag } from './images-science-core.js';
 
 const roles = (context, key, role) => context.shapes.filter(s => { const r = parse(tag(s, ZOOM_TAG)); return r?.key === key && r.role === role; });
 const recordsOf = source => parse(tag(source, RECORDS_TAG), []);
-const sourceSignature = source => JSON.stringify({ width: source.width, height: source.height, rotation: source.rotation || 0, crop: content(source).crop, fov: fovOf(source), color: tag(source, 'SLIDESCI_PSEUDO_COLOR'), image: imageIdentity(content(source).image) });
-const cropSignature = (source, region) => JSON.stringify({ region, aspect: source.width / source.height, crop: content(source).crop, fov: fovOf(source), color: tag(source, 'SLIDESCI_PSEUDO_COLOR'), image: imageIdentity(content(source).image) });
+const sourceSignature = source => JSON.stringify({ width: source.width, height: source.height, rotation: source.rotation || 0, crop: content(source).crop, fov: visibleFov(source), color: tag(source, 'SLIDESCI_PSEUDO_COLOR'), image: imageIdentity(content(source).image) });
+const cropSignature = (source, region) => JSON.stringify({ region, aspect: source.width / source.height, crop: content(source).crop, fov: visibleFov(source), color: tag(source, 'SLIDESCI_PSEUDO_COLOR'), image: imageIdentity(content(source).image) });
 const zoomDefaults = { name: '放大图', region: { x: .25, y: .25, width: .25, height: .25, rotation: 0 }, color: '#ff0000', lineWidth: 1.5, dash: 'solid', useColor: true, guides: true, extent: 'across', placement: 'right', scaleLength: null, scaleShowText: true };
 const defaultLine = options => ({ color: options.color, width: +options.lineWidth, dashStyle: options.dash, visible: true });
 const valuesOf = controls => Object.fromEntries(Object.entries(controls).map(([key, c]) => [key, c.type === 'checkbox' ? c.checked : c.type === 'number' ? +c.value : c.value]));
@@ -47,7 +47,7 @@ function restoreProperties(snapshot, shape) {
 }
 // Roll back a failed entry batch: remove objects created by the attempt, restore surviving originals and report direct replacements.
 async function rollbackSlide(ctx, before) {
-  const context = await ctx.host.context({ scope: 'slide' }), current = new Map();
+  const context = await ctx.host.context({ scope: 'slide', textSelection: false }), current = new Map();
   const walk = (items, parent) => { for (const shape of items) { current.set(shape.id, { shape, parent }); walk(shape.children || [], shape.id); } };
   walk(context.shapes || []);
   const replacement = new Map();
@@ -82,7 +82,7 @@ async function rollbackSlide(ctx, before) {
 async function applyScaleBarInternal(ctx, original, fov, settings) {
   validFov(fov);
   const s = { ...defaultScale, ...settings }, layout = scaleLayout(original, visibleFov(original, fov), s);
-  let key = await ensureUUID(ctx, original), context = await ctx.host.context({ scope: 'slide' }), source = findUUID(context, key);
+  let key = await ensureUUID(ctx, original), context = await ctx.host.context({ scope: 'slide', textSelection: false }), source = findUUID(context, key);
   if (!source) throw new Error('图片已不在当前幻灯片中。');
   const savedLinks = tag(source, RECORDS_TAG), originalGeometry = geometry(source), preservedTags = { ...source.tags, SLIDESCI_SCALE_CALIBRATION: serializeTag(visibleFov(original, fov)) };
   if (tag(source, 'SLIDESCI_SCALE_GROUP') === '1') {
@@ -121,6 +121,17 @@ async function synchronizeUngroupedScale(ctx, context) {
     if (tag(source, 'SLIDESCI_SCALE_GROUP') === '1') {
       if (tag(source, 'SLIDESCI_SCALE_CALIBRATION') !== serializeTag(visibleFov(source))) {
         context = (await applyScaleBarInternal(ctx, source, fovOf(source), settings)).context;
+      } else {
+        const length = Number(settings.vertical ? settings.heightMicrometers : settings.widthMicrometers);
+        const label = `${formatAmount(length / units[settings.lengthUnit])}${settings.lengthUnit}`;
+        for (const annotation of source.children || []) {
+          if (tag(annotation, SCALE_OWNER) === key && tag(annotation, 'SLIDESCI_SCALE_PART') === 'text' && annotation.text !== label) {
+            const bounds = scaleLayout(source, visibleFov(source), settings).text;
+            commands.push(bounds
+              ? { op: 'update', id: annotation.id, properties: { ...localBounds(source, bounds), text: label } }
+              : { op: 'delete', ids: [annotation.id] });
+          }
+        }
       }
       continue;
     }
@@ -132,7 +143,8 @@ async function synchronizeUngroupedScale(ctx, context) {
       const part = tag(annotation, 'SLIDESCI_SCALE_PART'), bounds = layout[part];
       if (!bounds) { commands.push({ op: 'delete', ids: [annotation.id] }); continue; }
       const expected = localBounds(source, bounds);
-      if (!near(expected, annotation)) commands.push({ op: 'update', id: annotation.id, properties: expected });
+      const text = part === 'text' && annotation.text !== layout.label;
+      if (text || !near(expected, annotation)) commands.push({ op: 'update', id: annotation.id, properties: { ...expected, ...(text ? { text: layout.label } : {}) } });
     }
   }
   const live = new Set(context.shapes.filter(isImage).map(s => tag(s, UUID_TAG)));
@@ -200,11 +212,14 @@ async function createOrUpdateZoom(ctx, context, source, entry, occupied = [], { 
   let alternativeText = writeRecord(writeRecord(baseAlt, SCALE_PREFIX, null), FOV_PREFIX, fov);
   const zoomUUID = zoom ? tag(zoom, UUID_TAG) || uuid() : uuid(), line = options.useColor ? defaultLine(options) : zoom?.line || { visible: false };
   if (zoom && needsPixels) {
+    // The replacement raster is rebuilt from the source region, so its FOV calibrates the whole new
+    // raster; preserveCrop:false drops any previous crop instead of letting it shrink that FOV.
     commands.push({ op: 'replaceImage', id: content(zoom).id, data: rendered.data, mime: rendered.mime, preserveCrop: false });
-    commands.push({ op: 'update', id: zoom.id, properties: { ...bounds, name: options.name, alternativeText, line, tags: { ...roleTags(key, 'zoom', sourceUUID), [UUID_TAG]: zoomUUID, SLIDESCI_FOV_VISIBLE: '1' } } });
-    if (content(zoom).id !== zoom.id) commands.push({ op: 'update', id: content(zoom).id, properties: { alternativeText, tags: { SLIDESCI_FOV_VISIBLE: '1' } } });
+    const rasterTags = { SLIDESCI_FOV_VISIBLE: '', SLIDESCI_FOV_SOURCE: '' };
+    commands.push({ op: 'update', id: zoom.id, properties: { ...bounds, name: options.name, alternativeText, line, tags: { ...roleTags(key, 'zoom', sourceUUID), [UUID_TAG]: zoomUUID, ...rasterTags } } });
+    if (content(zoom).id !== zoom.id) commands.push({ op: 'update', id: content(zoom).id, properties: { alternativeText, tags: rasterTags } });
   } else if (zoom) commands.push({ op: 'update', id: zoom.id, properties: { ...bounds, name: options.name, line, tags: roleTags(key, 'zoom', sourceUUID) } });
-  else commands.push({ op: 'insertImage', ...rendered, ...bounds, name: options.name, alternativeText, line, tags: { ...roleTags(key, 'zoom', sourceUUID), [UUID_TAG]: zoomUUID, SLIDESCI_FOV_VISIBLE: '1' } });
+  else commands.push({ op: 'insertImage', ...rendered, ...bounds, name: options.name, alternativeText, line, tags: { ...roleTags(key, 'zoom', sourceUUID), [UUID_TAG]: zoomUUID } });
   context = await ctx.host.apply(commands);
   marker = roles(context, key, 'marker')[0]; zoom = roles(context, key, 'zoom')[0];
   if (!marker || !zoom) throw new Error('未找到新建放大图或区域矩形。');
@@ -235,7 +250,7 @@ async function applyZoomEntriesInternal(ctx, sources, entries) {
   const added = entries.filter(e => !e.key), errors = [];
   for (let index = 0; index < sources.length; index++) {
     const key = await ensureUUID(ctx, sources[index]);
-    let context = await ctx.host.context({ scope: 'slide' }), source = findUUID(context, key);
+    let context = await ctx.host.context({ scope: 'slide', textSelection: false }), source = findUUID(context, key);
     if (!source) { errors.push(`${sources[index].name}：图片已不在当前幻灯片中。`); continue; }
     const before = snapshotSlide(context);
     const old = recordsOf(source), target = index === 0 ? entries : [...old, ...added.map(e => ({ ...e, key: null, manualId: null }))];
@@ -269,7 +284,7 @@ async function applyZoomEntriesInternal(ctx, sources, entries) {
 
 export async function reconcileSlide(ctx) {
   return scientificMutation(ctx, async () => {
-    let context = await ctx.host.context({ scope: 'slide' });
+    let context = await ctx.host.context({ scope: 'slide', textSelection: false });
     context = await synchronizeUngroupedScale(ctx, context);
     const sources = context.shapes.filter(s => isImage(s) && tag(s, RECORDS_TAG));
     for (const initial of sources) {
@@ -327,7 +342,10 @@ export function startScientificReconciliation(ctx, onError = error => ctx.servic
 
 async function mountScale(container, ctx) {
   const toolbar = element('div'), load = element('button', '读取所选图片'), apply = element('button', '应用到所选图片'), sync = element('button', '同步当前页'), status = element('p', '', { role: 'status' }), fields = element('fieldset'), preview = element('canvas', null, { width: 600, height: 340 });
-  fields.append(element('legend', 'FOV 与可编辑比例尺')); toolbar.append(load, apply, sync); container.append(toolbar, fields, preview, status);
+  // Status sits under the buttons: below the form and preview its messages were out of view.
+  fields.append(element('legend', 'FOV 与可编辑比例尺')); toolbar.append(load, apply, sync); container.append(toolbar, status, fields, preview);
+  // Nothing to apply until a picture is read; draw() enables it once the FOV and settings are valid.
+  apply.disabled = true;
   const fovControls = { width: control(fields, '原图 FOV 宽度（0 为未标定）', 'number', 0), height: control(fields, '原图 FOV 高度（0 为未标定）', 'number', 0), unit: control(fields, 'FOV 单位', 'select', 'μm', unitOptions) };
   const controls = {
     vertical: control(fields, '纵向比例尺', 'checkbox', false), widthMicrometers: control(fields, '横向长度（μm，0 隐藏）', 'number', 50), heightMicrometers: control(fields, '纵向长度（μm，0 隐藏）', 'number', 50), lengthUnit: control(fields, '显示单位', 'select', 'μm', unitOptions), thicknessPoints: control(fields, '厚度（pt）', 'number', 3), showText: control(fields, '显示文字', 'checkbox', true), barColor: control(fields, '比例尺颜色', 'color', '#ffffff'), fontColor: control(fields, '文字颜色', 'color', '#ffffff'), fontName: control(fields, '字体', 'text', 'Arial'), fontSize: control(fields, '字号（pt）', 'number', 14), bold: control(fields, '加粗', 'checkbox', true), corner: control(fields, '位置', 'select', 'BottomRight', [{ value: 'TopLeft', label: '左上' }, { value: 'BottomLeft', label: '左下' }, { value: 'TopRight', label: '右上' }, { value: 'BottomRight', label: '右下' }]), groupWithImage: control(fields, '与图片组合', 'checkbox', true)
@@ -344,12 +362,12 @@ async function mountScale(container, ctx) {
       validFov(fov); const visible = visibleFov(shape, fov), layout = scaleLayout(shape, visible, s);
       if (layout.bar) { g.fillStyle = s.barColor; g.fillRect(layout.bar.left, layout.bar.top, layout.bar.width, layout.bar.height); }
       if (layout.text) { g.fillStyle = s.fontColor; g.font = `${s.bold ? 'bold ' : ''}${s.fontSize}px "${s.fontName}"`; g.textBaseline = 'top'; g.fillText(layout.label, layout.text.left, layout.text.top); }
-      status.textContent = `可见 FOV：${visible.width.toFixed(2)} × ${visible.height.toFixed(2)} μm。${fovOf(shape)?.source || ''}`; apply.disabled = false;
+      status.textContent = `可见 FOV：${formatAmount(visible.width)} × ${formatAmount(visible.height)} μm。${fovOf(shape)?.source || ''}`; apply.disabled = false;
     } catch (error) { errorStatus(status, error); apply.disabled = true; }
     g.restore();
   }
   fields.addEventListener('input', draw);
-  load.onclick = async () => { try { shapes = pictures(await ctx.host.context()); const fov = fovOf(shapes[0]) || { width: 0, height: 0, unit: 'μm' }; const saved = await ctx.services.request('images/settings', {}); setControls(fovControls, fov); setControls(controls, scaleOf(shapes[0]) || saved.scale || defaultScale); const rendered = await ctx.services.request('images/crop', { ...await imageFor(ctx, shapes[0]), region: { x: 0, y: 0, width: 1, height: 1, rotation: 0 }, maximum: 800 }); image = new Image(); image.onload = () => { if (!disposed) draw(); }; image.src = `data:${rendered.mime};base64,${rendered.data}`; draw(); } catch (error) { errorStatus(status, error); } };
+  load.onclick = async () => { try { shapes = pictures(await ctx.host.context({ textSelection: false })); const fov = fovOf(shapes[0]) || { width: 0, height: 0, unit: 'μm' }; const saved = await ctx.services.request('images/settings', {}); setControls(fovControls, fov); setControls(controls, scaleOf(shapes[0]) || saved.scale || defaultScale); const rendered = await ctx.services.request('images/crop', { ...await imageFor(ctx, shapes[0]), region: { x: 0, y: 0, width: 1, height: 1, rotation: 0 }, maximum: 800 }); image = new Image(); image.onload = () => { if (!disposed) draw(); }; image.src = `data:${rendered.mime};base64,${rendered.data}`; draw(); } catch (error) { errorStatus(status, error); } };
   apply.onclick = async () => { apply.disabled = true; try { if (!shapes.length) throw new Error('请先读取所选图片。'); const fov = validFov({ ...valuesOf(fovControls), source: '手动设置' }), s = valuesOf(controls); for (const shape of shapes) scaleLayout(shape, visibleFov(shape, fov), s); for (const shape of shapes) await applyScaleBar(ctx, shape, fov, s); status.textContent = `已更新 ${shapes.length} 张图片的 FOV 与比例尺。`; } catch (error) { errorStatus(status, error); } finally { apply.disabled = false; } };
   sync.onclick = async () => { sync.disabled = true; try { await reconcileSlide(ctx); status.textContent = '已同步当前页的比例尺与放大图。'; } catch (error) { errorStatus(status, error); } finally { sync.disabled = false; } };
   return () => { disposed = true; };
@@ -359,7 +377,7 @@ async function mountZoom(container, ctx) {
   const toolbar = element('div'), load = element('button', '读取所选图片/矩形'), add = element('button', '新增区域'), remove = element('button', '删除当前区域'), fit = element('button', '适合窗口'), apply = element('button', '应用全部区域'), sync = element('button', '同步当前页'), status = element('p', '滚轮缩放；空格/中键拖动平移；拖动绘制区域、内部移动、角点缩放；Delete 删除。', { role: 'status' });
   toolbar.append(load, add, remove, fit, apply, sync); const list = control(toolbar, '当前区域', 'select', '', []);
   const canvas = element('canvas', null, { width: 760, height: 460, tabIndex: 0 }); canvas.setAttribute('aria-label', '多个放大区域编辑画布'); canvas.setAttribute('role', 'application');
-  const fields = element('fieldset'); fields.append(element('legend', '每个区域独立设置')); container.append(toolbar, canvas, fields, status);
+  const fields = element('fieldset'); fields.append(element('legend', '每个区域独立设置')); container.append(toolbar, status, canvas, fields);
   const layoutPreview = element('canvas', null, { width: 760, height: 360 });
   layoutPreview.setAttribute('aria-label', '全部放大图、方向、辅助线和比例尺布局预览');
   container.insertBefore(layoutPreview, fields);
@@ -462,7 +480,7 @@ async function mountZoom(container, ctx) {
   async function reload({ refreshPreview = true } = {}) {
     load.disabled = true;
     try {
-      const context = await ctx.host.context(), items = selected(context), rectangle = items.filter(s => !isImage(s)); sources = items.filter(isImage);
+      const context = await ctx.host.context({ textSelection: false }), items = selected(context), rectangle = items.filter(s => !isImage(s)); sources = items.filter(isImage);
       if (!sources.length || rectangle.length > 1 || rectangle.length && sources.length !== 1 || rectangle.some(s => s.type !== 'shape' || s.shapeType && s.shapeType !== 'rectangle')) throw new Error('请选择一张或多张图片，或一张图片和一个普通矩形。');
       const saved = await ctx.services.request('images/settings', {}); entries = structuredClone(recordsOf(sources[0]));
       for (const entry of entries) { const marker = roles(context, entry.key, 'marker')[0]; if (marker) entry.region = relativeRegion(sources[0], marker); }
@@ -494,13 +512,13 @@ async function setImageFov(ctx, shape, fov) {
 }
 export const actions = [
   { id: 'science.setFov', label: '设置原图 FOV', section: '科学图片', fields: [{ name: 'width', label: '原图物理宽度（0 为未标定）', type: 'number', default: 0, min: 0 }, { name: 'height', label: '原图物理高度（0 为未标定）', type: 'number', default: 0, min: 0 }, { name: 'unit', label: '单位', type: 'select', default: 'μm', options: unitOptions }], run: (ctx, values) => scientificMutation(ctx, async () => {
-    const shapes = pictures(await ctx.host.context()), fov = validFov({ width: +values.width, height: +values.height, unit: values.unit, source: '手动设置' });
+    const shapes = pictures(await ctx.host.context({ textSelection: false })), fov = validFov({ width: +values.width, height: +values.height, unit: values.unit, source: '手动设置' });
     for (const shape of shapes) { const scale = scaleOf(shape); if (scale) scaleLayout(shape, visibleFov(shape, fov), scale); }
     for (const shape of shapes) await setImageFov(ctx, shape, fov);
     return { count: shapes.length };
   }) },
   { id: 'science.readFov', label: '重新读取 TIFF 标定', section: '科学图片', run: ctx => scientificMutation(ctx, async () => {
-    const shapes = pictures(await ctx.host.context()), calibrated = [];
+    const shapes = pictures(await ctx.host.context({ textSelection: false })), calibrated = [];
     for (const shape of shapes) {
       const sourceTag = tag(shape, 'SLIDESCI_SOURCE_PATH'), originalPath = (content(shape).alternativeText || '').split(/[\r\n]+/).filter(l => l.startsWith('原图路径：')).at(-1)?.slice('原图路径：'.length) || parse(sourceTag, sourceTag);
       // Read the recorded file directly; only fall back to native bytes when the object has no source path.
