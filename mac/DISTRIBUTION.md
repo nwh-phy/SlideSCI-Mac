@@ -1,4 +1,4 @@
-# SlideSCI Mac 0.2.1 安装与发行说明
+# SlideSCI Mac 0.2.2 安装与发行说明
 
 此 ZIP 面向 Apple Silicon Mac，内置 Node.js 24.22.3、生产依赖及 Swift 原生辅助程序。使用者无需安装 Node.js、Python 或 Xcode。原生程序按 macOS 14 最低版本构建，安装器和各 `.command` 在更早的系统上直接说明并退出；Intel Mac 未验证。PowerPoint 需要 PowerPointApi 1.10（Mac 16.105 起）及 SharedRuntime 1.1；Office.js 首次加载需要访问微软 CDN。
 
@@ -11,7 +11,7 @@
 1. 先安装并打开需要使用的 WPS 或 PowerPoint 一次，再保存现有工作并完全退出（`Cmd+Q`）。安装器只注册已经初始化容器的宿主。
 2. 解压 ZIP，运行 `Install.command`。程序安装到 `~/Library/Application Support/SlideSCI-Mac`，同时写入登录自启配置并启动本机后台服务。若本机已安装旧版（0.1.x 及以上同路径安装器版本），`Install.command` 支持提示后**原地平滑升级**（自动停止旧服务、备份旧版程序、复用已信任的本地证书免重复输入密码，并在 PowerPoint 未运行且 manifest 有变化时询问是否清理 Wef 加载项缓存；非交互部署可传 `--upgrade yes`、`--clear-wef-cache yes|no`，未作答时不清理）。素材和设置均保留。升级只保留最近一份旧版程序备份（`SlideSCI-Mac.previous-时间`），更早的备份在升级成功后删除。
 3. `Start.command` 启动服务并恢复登录自动运行；`Stop.command` 停止服务并取消登录自动运行。登录时若 3000/3443 已被其他程序占用，服务直接退出、不反复重启；结束占用端口的程序后运行 `Start.command`，它会说明占用情况并重新启动。服务日志 `service.log` 超过 5MB 时自动轮换，只保留一份 `service.log.1`。
-4. WPS：保存工作并重开 WPS，确认信任 `slidesci-mac-dev`，从顶部 SlideSCI 分组按钮直接选择功能。
+4. WPS：保存工作并重开 WPS（若弹出信任 `slidesci-mac-dev` 的提示，选择允许），从顶部 SlideSCI 分组按钮直接选择功能。
 5. PowerPoint：PowerPoint 只通过受 macOS 信任的 HTTPS 加载 SlideSCI。安装时会为本机生成独立的 `localhost` 证书和私钥（有效期 825 天），保存在 `~/Library/Application Support/SlideSCI-Mac-Installer/tls/`，私钥只保存在本机。安装器会询问是否信任该证书（仅用于 `localhost` 的 SSL，不创建 CA）；同意后输入登录密码即完成。证书剩余 30 天内可运行 `RenewCertificate.command` 换新。
 6. 保存工作并 `Cmd+Q` 重开 PowerPoint，从“开始 → 加载项 → 更多加载项 → 开发人员加载项”双击 `SlideSCI Mac`。如安装时未退出 PowerPoint 导致升级后功能区仍显示旧版或找不到插件，先 `Cmd+Q` 退出 PowerPoint 并删除 `~/Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches/Microsoft/Office/16.0/Wef` 后重开即可。
 
